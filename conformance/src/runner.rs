@@ -314,7 +314,7 @@ fn values_equal(a: &CelValue, b: &CelValue) -> bool {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TestResults {
     pub passed: Vec<String>,
     pub failed: Vec<(String, String)>,
