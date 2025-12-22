@@ -17,6 +17,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "../cel-spec/proto/cel/expr/checked.proto",
             "../cel-spec/proto/cel/expr/eval.proto",
             "../cel-spec/proto/cel/expr/conformance/test/simple.proto",
+            "../cel-spec/proto/cel/expr/conformance/proto2/test_all_types.proto",
+            "../cel-spec/proto/cel/expr/conformance/proto3/test_all_types.proto",
         ],
         &["../cel-spec/proto"],
     )?;
