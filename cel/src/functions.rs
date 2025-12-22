@@ -223,6 +223,36 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     })
 }
 
+/// The `dyn` function marks a value as dynamic during type-checking.
+/// At runtime, it simply returns the value unchanged.
+pub fn dyn_(ftx: &FunctionContext, value: Value) -> Result<Value> {
+    // At runtime, dyn is a no-op - just return the value
+    Ok(value)
+}
+
+/// The `type` function returns the type name of a value as a string.
+/// This is used for type checking and introspection.
+pub fn type_(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    let type_name = match this {
+        Value::Null => "null_type",
+        Value::Bool(_) => "bool",
+        Value::Int(_) => "int",
+        Value::UInt(_) => "uint",
+        Value::Float(_) => "double",
+        Value::String(_) => "string",
+        Value::Bytes(_) => "bytes",
+        Value::List(_) => "list",
+        Value::Map(_) => "map",
+        #[cfg(feature = "chrono")]
+        Value::Timestamp(_) => "google.protobuf.Timestamp",
+        #[cfg(feature = "chrono")]
+        Value::Duration(_) => "google.protobuf.Duration",
+        Value::Function(_, _) => "function",
+        Value::Opaque(_) => return Err(ftx.error("type() not supported for opaque values")),
+    };
+    Ok(Value::String(Arc::new(type_name.to_string())))
+}
+
 pub fn optional_none(ftx: &FunctionContext) -> Result<Value> {
     if ftx.this.is_some() || !ftx.args.is_empty() {
         return Err(ftx.error("unsupported function"));

@@ -45,9 +45,60 @@ static MIN_TIMESTAMP: LazyLock<chrono::DateTime<chrono::FixedOffset>> = LazyLock
         .from_utc_datetime(&naive)
 });
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub struct Map {
     pub map: Arc<HashMap<Key, Value>>,
+}
+
+impl PartialEq for Map {
+    fn eq(&self, other: &Self) -> bool {
+        if self.map.len() != other.map.len() {
+            return false;
+        }
+        
+        // Check that for every key in self, there's a matching key in other with equal value
+        for (key, value) in self.map.iter() {
+            // Try direct lookup first
+            if let Some(other_value) = other.map.get(key) {
+                if value != other_value {
+                    return false;
+                }
+            } else {
+                // Try cross-type lookup for numeric keys
+                let converted_key = match key {
+                    Key::Int(k) => {
+                        if let Ok(u) = u64::try_from(*k) {
+                            Some(Key::Uint(u))
+                        } else {
+                            None
+                        }
+                    }
+                    Key::Uint(k) => {
+                        if let Ok(i) = i64::try_from(*k) {
+                            Some(Key::Int(i))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                
+                if let Some(converted) = converted_key {
+                    if let Some(other_value) = other.map.get(&converted) {
+                        if value != other_value {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+        }
+        
+        true
+    }
 }
 
 impl PartialOrd for Map {
