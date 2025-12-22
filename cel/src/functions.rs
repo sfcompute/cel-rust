@@ -225,7 +225,7 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
 
 /// The `dyn` function marks a value as dynamic during type-checking.
 /// At runtime, it simply returns the value unchanged.
-pub fn dyn_(ftx: &FunctionContext, value: Value) -> Result<Value> {
+pub fn dyn_(_ftx: &FunctionContext, value: Value) -> Result<Value> {
     // At runtime, dyn is a no-op - just return the value
     Ok(value)
 }
@@ -243,6 +243,10 @@ pub fn type_(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         Value::Bytes(_) => "bytes",
         Value::List(_) => "list",
         Value::Map(_) => "map",
+        Value::Struct(s) => {
+            // Clone the type name to avoid lifetime issues
+            return Ok(Value::String(s.type_name.clone()));
+        }
         #[cfg(feature = "chrono")]
         Value::Timestamp(_) => "google.protobuf.Timestamp",
         #[cfg(feature = "chrono")]

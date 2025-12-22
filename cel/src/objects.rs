@@ -50,6 +50,43 @@ pub struct Map {
     pub map: Arc<HashMap<Key, Value>>,
 }
 
+/// A struct represents a protocol buffer message or a CEL struct literal.
+/// It has a type name and a map of field names to values.
+#[derive(Debug, Clone)]
+pub struct Struct {
+    pub type_name: Arc<String>,
+    pub fields: Arc<HashMap<String, Value>>,
+}
+
+impl PartialEq for Struct {
+    fn eq(&self, other: &Self) -> bool {
+        // Structs are equal if they have the same type name and all fields are equal
+        if self.type_name != other.type_name {
+            return false;
+        }
+        if self.fields.len() != other.fields.len() {
+            return false;
+        }
+        for (key, value) in self.fields.iter() {
+            match other.fields.get(key) {
+                Some(other_value) => {
+                    if value != other_value {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        true
+    }
+}
+
+impl PartialOrd for Struct {
+    fn partial_cmp(&self, _: &Self) -> Option<Ordering> {
+        None
+    }
+}
+
 impl PartialEq for Map {
     fn eq(&self, other: &Self) -> bool {
         if self.map.len() != other.map.len() {
@@ -412,6 +449,7 @@ impl TryIntoValue for Value {
 pub enum Value {
     List(Arc<Vec<Value>>),
     Map(Map),
+    Struct(Struct),
 
     Function(Arc<String>, Option<Box<Value>>),
 
@@ -435,6 +473,7 @@ impl Debug for Value {
         match self {
             Value::List(l) => write!(f, "List({:?})", l),
             Value::Map(m) => write!(f, "Map({:?})", m),
+            Value::Struct(s) => write!(f, "Struct({:?})", s),
             Value::Function(name, func) => write!(f, "Function({:?}, {:?})", name, func),
             Value::Int(i) => write!(f, "Int({:?})", i),
             Value::UInt(u) => write!(f, "UInt({:?})", u),
@@ -471,6 +510,7 @@ impl From<CelVal> for Value {
 pub enum ValueType {
     List,
     Map,
+    Struct,
     Function,
     Int,
     UInt,
@@ -489,6 +529,7 @@ impl Display for ValueType {
         match self {
             ValueType::List => write!(f, "list"),
             ValueType::Map => write!(f, "map"),
+            ValueType::Struct => write!(f, "struct"),
             ValueType::Function => write!(f, "function"),
             ValueType::Int => write!(f, "int"),
             ValueType::UInt => write!(f, "uint"),
@@ -509,6 +550,7 @@ impl Value {
         match self {
             Value::List(_) => ValueType::List,
             Value::Map(_) => ValueType::Map,
+            Value::Struct(_) => ValueType::Struct,
             Value::Function(_, _) => ValueType::Function,
             Value::Int(_) => ValueType::Int,
             Value::UInt(_) => ValueType::UInt,
@@ -560,6 +602,7 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Map(a), Value::Map(b)) => a == b,
+            (Value::Struct(a), Value::Struct(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Function(a1, a2), Value::Function(b1, b2)) => a1 == b1 && a2 == b2,
             (Value::Int(a), Value::Int(b)) => a == b,
@@ -1047,6 +1090,9 @@ impl Value {
                             }
                             Ok(Value::Bool(false))
                         }
+                        Value::Struct(s) => {
+                            Ok(Value::Bool(s.fields.contains_key(&select.field)))
+                        }
                         _ => Ok(Value::Bool(false)),
                     }
                 } else {
@@ -1137,7 +1183,28 @@ impl Value {
                 }
                 Value::resolve(&comprehension.result, &ctx)
             }
-            Expr::Struct(_) => todo!("Support structs!"),
+            Expr::Struct(struct_expr) => {
+                let mut fields = HashMap::with_capacity(struct_expr.entries.len());
+                for entry in struct_expr.entries.iter() {
+                    match &entry.expr {
+                        EntryExpr::StructField(field_expr) => {
+                            let value = Value::resolve(&field_expr.value, ctx)?;
+                            fields.insert(field_expr.field.clone(), value);
+                        }
+                        EntryExpr::MapEntry(_) => {
+                            return Err(ExecutionError::function_error(
+                                "struct",
+                                "Map entries not allowed in struct literals",
+                            ));
+                        }
+                    }
+                }
+                Value::Struct(Struct {
+                    type_name: Arc::new(struct_expr.type_name.clone()),
+                    fields: Arc::new(fields),
+                })
+                .into()
+            }
             Expr::Unspecified => panic!("Can't evaluate Unspecified Expr"),
         }
     }
@@ -1159,6 +1226,7 @@ impl Value {
         // a property on self, or a method on self.
         let child = match self {
             Value::Map(ref m) => m.map.get(&name.clone().into()).cloned(),
+            Value::Struct(ref s) => s.fields.get(name.as_str()).cloned(),
             _ => None,
         };
 
