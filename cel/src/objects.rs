@@ -915,12 +915,23 @@ impl Value {
                         }
                         operators::NEGATE => {
                             return match Value::resolve(&call.args[0], ctx)? {
-                                Value::Int(i) => Ok(Value::Int(-i)),
+                                Value::Int(i) => {
+                                    // Check for overflow: negating i64::MIN causes overflow
+                                    if i == i64::MIN {
+                                        Err(ExecutionError::Overflow(
+                                            "minus",
+                                            Value::Int(i),
+                                            Value::Int(0),
+                                        ))
+                                    } else {
+                                        Ok(Value::Int(-i))
+                                    }
+                                }
                                 Value::Float(f) => Ok(Value::Float(-f)),
                                 value => {
                                     Err(ExecutionError::UnsupportedUnaryOperator("minus", value))
                                 }
-                            }
+                            };
                         }
                         operators::NOT_STRICTLY_FALSE => {
                             return match Value::resolve(&call.args[0], ctx)? {
