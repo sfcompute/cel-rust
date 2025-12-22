@@ -353,10 +353,7 @@ impl TestResults {
         println!("  Total:   {}", total);
 
         if !self.failed.is_empty() {
-            println!("\nFailed tests:");
-            for (name, error) in &self.failed {
-                println!("  - {}: {}", name, error);
-            }
+            self.print_grouped_failures();
         }
 
         if !self.skipped.is_empty() && self.skipped.len() <= 20 {
@@ -371,6 +368,185 @@ impl TestResults {
             );
         }
     }
+
+    fn print_grouped_failures(&self) {
+        use std::collections::HashMap;
+
+        // Group by test category based on test name patterns
+        let mut category_groups: HashMap<String, Vec<&(String, String)>> = HashMap::new();
+        
+        for failure in &self.failed {
+            let category = categorize_test(&failure.0, &failure.1);
+            category_groups.entry(category).or_insert_with(Vec::new).push(failure);
+        }
+
+        // Sort categories by count (descending)
+        let mut categories: Vec<_> = category_groups.iter().collect();
+        categories.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+        println!("\nFailed tests by category:");
+        for (category, failures) in &categories {
+            let count = failures.len();
+            let failure_word = if count == 1 { "failure" } else { "failures" };
+            println!("\n  {} ({} {}):", category, count, failure_word);
+            // Show up to 5 examples per category
+            let examples_to_show = failures.len().min(5);
+            for failure in failures.iter().take(examples_to_show) {
+                println!("    - {}: {}", failure.0, failure.1);
+            }
+            if failures.len() > examples_to_show {
+                println!("    ... and {} more", failures.len() - examples_to_show);
+            }
+        }
+    }
+}
+
+fn categorize_test(name: &str, error: &str) -> String {
+    // First, categorize by error type
+    if error.starts_with("Parse error:") {
+        if name.contains("optional") || name.contains("opt") {
+            return "Optional/Chaining (Parse errors)".to_string();
+        }
+        return "Parse errors".to_string();
+    }
+
+    if error.starts_with("Execution error:") {
+        // Categorize by error content
+        if error.contains("UndeclaredReference") {
+            let ref_name = extract_reference_name(error);
+            if ref_name == "dyn" {
+                return "Dynamic type operations".to_string();
+            } else if ref_name == "format" {
+                return "String formatting".to_string();
+            } else if ref_name == "greatest" || ref_name == "least" {
+                return "Math functions (greatest/least)".to_string();
+            } else if ref_name == "exists" || ref_name == "all" || ref_name == "existsOne" {
+                return "List/map operations (exists/all/existsOne)".to_string();
+            } else if ref_name == "optMap" || ref_name == "optFlatMap" {
+                return "Optional operations (optMap/optFlatMap)".to_string();
+            } else if ref_name == "bind" {
+                return "Macro/binding operations".to_string();
+            } else if ref_name == "encode" || ref_name == "decode" {
+                return "Encoding/decoding operations".to_string();
+            } else if ref_name == "transformList" || ref_name == "transformMap" {
+                return "Transform operations".to_string();
+            } else if ref_name == "type" || ref_name == "google" {
+                return "Type operations".to_string();
+            } else if ref_name == "a" {
+                return "Qualified identifier resolution".to_string();
+            }
+            return format!("Undeclared references ({})", ref_name);
+        }
+        
+        if error.contains("FunctionError") && error.contains("Panic") {
+            if name.contains("to_any") || name.contains("to_json") || name.contains("to_null") {
+                return "Type conversions (to_any/to_json/to_null)".to_string();
+            }
+            if name.contains("eq_") || name.contains("ne_") {
+                return "Equality operations (proto/type conversions)".to_string();
+            }
+            return "Function panics".to_string();
+        }
+        
+        if error.contains("NoSuchKey") {
+            return "Map key access errors".to_string();
+        }
+        
+        if error.contains("UnsupportedBinaryOperator") {
+            return "Binary operator errors".to_string();
+        }
+        
+        if error.contains("ValuesNotComparable") {
+            return "Comparison errors (bytes/unsupported)".to_string();
+        }
+        
+        if error.contains("UnsupportedMapIndex") {
+            return "Map index errors".to_string();
+        }
+        
+        if error.contains("UnexpectedType") {
+            return "Type mismatch errors".to_string();
+        }
+        
+        if error.contains("DivisionByZero") {
+            return "Division by zero errors".to_string();
+        }
+        
+        if error.contains("NoSuchOverload") {
+            return "Overload resolution errors".to_string();
+        }
+    }
+
+    // Categorize by test name patterns
+    if name.contains("optional") || name.contains("opt") {
+        return "Optional/Chaining operations".to_string();
+    }
+    
+    if name.contains("struct") {
+        return "Struct operations".to_string();
+    }
+    
+    if name.contains("string") || name.contains("String") {
+        return "String operations".to_string();
+    }
+    
+    if name.contains("format") {
+        return "String formatting".to_string();
+    }
+    
+    if name.contains("timestamp") || name.contains("Timestamp") {
+        return "Timestamp operations".to_string();
+    }
+    
+    if name.contains("duration") || name.contains("Duration") {
+        return "Duration operations".to_string();
+    }
+    
+    if name.contains("eq_") || name.contains("ne_") {
+        return "Equality/inequality operations".to_string();
+    }
+    
+    if name.contains("lt_") || name.contains("gt_") || name.contains("lte_") || name.contains("gte_") {
+        return "Comparison operations (lt/gt/lte/gte)".to_string();
+    }
+    
+    if name.contains("bytes") || name.contains("Bytes") {
+        return "Bytes operations".to_string();
+    }
+    
+    if name.contains("list") || name.contains("List") {
+        return "List operations".to_string();
+    }
+    
+    if name.contains("map") || name.contains("Map") {
+        return "Map operations".to_string();
+    }
+    
+    if name.contains("unicode") {
+        return "Unicode operations".to_string();
+    }
+    
+    if name.contains("conversion") || name.contains("Conversion") {
+        return "Type conversions".to_string();
+    }
+    
+    if name.contains("math") || name.contains("Math") {
+        return "Math operations".to_string();
+    }
+
+    // Default category
+    "Other failures".to_string()
+}
+
+fn extract_reference_name(error: &str) -> &str {
+    // Extract the reference name from "UndeclaredReference(\"name\")"
+    if let Some(start) = error.find("UndeclaredReference(\"") {
+        let start = start + "UndeclaredReference(\"".len();
+        if let Some(end) = error[start..].find('"') {
+            return &error[start..start + end];
+        }
+    }
+    "unknown"
 }
 
 #[derive(Debug)]
