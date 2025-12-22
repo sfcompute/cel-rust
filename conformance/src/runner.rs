@@ -13,11 +13,20 @@ use crate::value_converter::proto_value_to_cel_value;
 
 pub struct ConformanceRunner {
     test_data_dir: PathBuf,
+    category_filter: Option<String>,
 }
 
 impl ConformanceRunner {
     pub fn new(test_data_dir: PathBuf) -> Self {
-        Self { test_data_dir }
+        Self {
+            test_data_dir,
+            category_filter: None,
+        }
+    }
+
+    pub fn with_category_filter(mut self, category: String) -> Self {
+        self.category_filter = Some(category);
+        self
     }
 
     pub fn run_all_tests(&self) -> Result<TestResults, RunnerError> {
@@ -89,6 +98,13 @@ impl ConformanceRunner {
         // Run all tests in all sections
         for section in &test_file.section {
             for test in &section.test {
+                // Filter by category if specified
+                if let Some(ref filter_category) = self.category_filter {
+                    if !test_name_matches_category(&test.name, filter_category) {
+                        continue;
+                    }
+                }
+
                 // Catch panics so we can continue running all tests
                 let test_result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_test(test)));
@@ -547,6 +563,72 @@ fn extract_reference_name(error: &str) -> &str {
         }
     }
     "unknown"
+}
+
+/// Check if a test name matches a category filter (before running the test).
+/// This is an approximation based on test name patterns.
+fn test_name_matches_category(test_name: &str, category: &str) -> bool {
+    let name_lower = test_name.to_lowercase();
+    let category_lower = category.to_lowercase();
+
+    // Match category names to test name patterns
+    match category_lower.as_str() {
+        "dynamic type operations" | "dynamic" => {
+            name_lower.contains("dyn") || name_lower.contains("dynamic")
+        }
+        "string formatting" | "format" => {
+            name_lower.contains("format") || name_lower.starts_with("format_")
+        }
+        "math functions (greatest/least)" | "greatest" | "least" | "math functions" => {
+            name_lower.contains("greatest") || name_lower.contains("least")
+        }
+        "optional/chaining (parse errors)" | "optional/chaining operations" | "optional" | "chaining" => {
+            name_lower.contains("optional") || name_lower.contains("opt") || name_lower.contains("chaining")
+        }
+        "struct operations" | "struct" => {
+            name_lower.contains("struct")
+        }
+        "string operations" | "string" => {
+            name_lower.contains("string") && !name_lower.contains("format")
+        }
+        "timestamp operations" | "timestamp" => {
+            name_lower.contains("timestamp") || name_lower.contains("time")
+        }
+        "duration operations" | "duration" => {
+            name_lower.contains("duration")
+        }
+        "equality/inequality operations" | "equality" | "inequality" => {
+            name_lower.starts_with("eq_") || name_lower.starts_with("ne_")
+        }
+        "comparison operations (lt/gt/lte/gte)" | "comparison" => {
+            name_lower.starts_with("lt_") || name_lower.starts_with("gt_") 
+                || name_lower.starts_with("lte_") || name_lower.starts_with("gte_")
+        }
+        "bytes operations" | "bytes" => {
+            name_lower.contains("bytes") || name_lower.contains("byte")
+        }
+        "list operations" | "list" => {
+            name_lower.contains("list") || name_lower.contains("elem")
+        }
+        "map operations" | "map" => {
+            name_lower.contains("map") && !name_lower.contains("optmap")
+        }
+        "unicode operations" | "unicode" => {
+            name_lower.contains("unicode")
+        }
+        "type conversions" | "conversion" => {
+            name_lower.contains("conversion") || name_lower.starts_with("to_")
+        }
+        "parse errors" => {
+            // We can't predict parse errors from the name, so include all tests
+            // that might have parse errors (optional syntax, etc.)
+            name_lower.contains("optional") || name_lower.contains("opt")
+        }
+        _ => {
+            // Try partial matching
+            category_lower.split_whitespace().any(|word| name_lower.contains(word))
+        }
+    }
 }
 
 #[derive(Debug)]
