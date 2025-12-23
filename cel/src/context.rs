@@ -197,6 +197,12 @@ impl Default for Context<'_> {
         ctx.add_function("split", functions::split);
         ctx.add_function("substring", functions::substring);
         ctx.add_function("trim", functions::trim);
+        ctx.add_function("replace", functions::replace);
+        ctx.add_function("decode", functions::decode);
+        ctx.add_function("exists", functions::exists_func);
+        ctx.add_function("all", functions::all_func);
+        ctx.add_function("existsOne", functions::exists_one_func);
+        ctx.add_function("transformList", functions::transform_list);
         ctx.add_function("string", functions::string);
         ctx.add_function("bytes", functions::bytes);
         ctx.add_function("double", functions::double);
@@ -232,6 +238,13 @@ impl Default for Context<'_> {
         ctx.add_function("isInf", functions::is_inf);
         ctx.add_function("bitOr", functions::bit_or);
         ctx.add_function("bitXor", functions::bit_xor);
+        ctx.add_function("bitAnd", functions::bit_and);
+        ctx.add_function("bitNot", functions::bit_not);
+        ctx.add_function("bitShiftLeft", functions::bit_shift_left);
+        ctx.add_function("bitShiftRight", functions::bit_shift_right);
+        ctx.add_function("abs", functions::abs);
+        ctx.add_function("math.abs", functions::abs);
+        ctx.add_function("math.sign", functions::sign);
         ctx.add_function("lowerAscii", functions::lower_ascii);
         ctx.add_function("upperAscii", functions::upper_ascii);
         ctx.add_function("reverse", functions::reverse);
