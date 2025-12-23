@@ -186,6 +186,17 @@ impl Default for Context<'_> {
         ctx.add_function("min", functions::min);
         ctx.add_function("startsWith", functions::starts_with);
         ctx.add_function("endsWith", functions::ends_with);
+        ctx.add_function("charAt", functions::char_at);
+        ctx.add_function("indexOf", functions::index_of);
+        ctx.add_function("lastIndexOf", functions::last_index_of);
+        ctx.add_function("quote", functions::quote);
+        ctx.add_function("strings.quote", functions::quote);
+        ctx.add_function("isNaN", functions::is_nan);
+        ctx.add_function("math.isNaN", functions::is_nan);
+        ctx.add_function("sign", functions::sign);
+        ctx.add_function("split", functions::split);
+        ctx.add_function("substring", functions::substring);
+        ctx.add_function("trim", functions::trim);
         ctx.add_function("string", functions::string);
         ctx.add_function("bytes", functions::bytes);
         ctx.add_function("double", functions::double);
@@ -193,6 +204,11 @@ impl Default for Context<'_> {
         ctx.add_function("uint", functions::uint);
         ctx.add_function("dyn", functions::dyn_);
         ctx.add_function("type", functions::type_);
+        ctx.add_function("list", functions::list_constructor);
+        ctx.add_function("map", functions::map_constructor);
+        ctx.add_function("null_type", functions::null_type);
+        ctx.add_function("math", functions::math_type);
+        ctx.add_function("bool", functions::bool_constructor);
         ctx.add_function("optional.none", functions::optional_none);
         ctx.add_function("optional.of", functions::optional_of);
         ctx.add_function(

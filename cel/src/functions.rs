@@ -284,6 +284,31 @@ pub fn type_(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     Ok(Value::String(Arc::new(type_name.to_string())))
 }
 
+/// Returns an empty list. Used for type denotation.
+pub fn list_constructor(_ftx: &FunctionContext) -> Result<Value> {
+    Ok(Value::List(Arc::new(vec![])))
+}
+
+/// Returns an empty map. Used for type denotation.
+pub fn map_constructor(_ftx: &FunctionContext) -> Result<Value> {
+    Ok(Value::Map(crate::objects::Map { map: Arc::new(std::collections::HashMap::new()) }))
+}
+
+/// Returns the null_type string. Used for type denotation.
+pub fn null_type(_ftx: &FunctionContext) -> Result<Value> {
+    Ok(Value::String(Arc::new("null_type".to_string())))
+}
+
+/// Returns the math type. Used for type denotation.
+pub fn math_type(_ftx: &FunctionContext) -> Result<Value> {
+    Ok(Value::String(Arc::new("math".to_string())))
+}
+
+/// Returns false as the default bool value. Used for type denotation.
+pub fn bool_constructor(_ftx: &FunctionContext) -> Result<Value> {
+    Ok(Value::Bool(false))
+}
+
 pub fn optional_none(ftx: &FunctionContext) -> Result<Value> {
     if ftx.this.is_some() || !ftx.args.is_empty() {
         return Err(ftx.error("unsupported function"));
@@ -356,6 +381,152 @@ pub fn starts_with(This(this): This<Arc<String>>, prefix: Arc<String>) -> bool {
 /// ```
 pub fn ends_with(This(this): This<Arc<String>>, suffix: Arc<String>) -> bool {
     this.ends_with(suffix.as_str())
+}
+
+/// Returns the character at the specified index in the string.
+///
+/// # Example
+/// ```cel
+/// "abc".charAt(1) == "b"
+/// ```
+pub fn char_at(ftx: &FunctionContext, This(this): This<Arc<String>>, index: i64) -> Result<Value> {
+    if index < 0 {
+        return Err(ftx.error(format!("charAt index {} is negative", index)));
+    }
+    
+    let chars: Vec<char> = this.chars().collect();
+    let idx = index as usize;
+    
+    if idx >= chars.len() {
+        return Err(ftx.error(format!("charAt index {} is out of range for string of length {}", index, chars.len())));
+    }
+    
+    Ok(Value::String(Arc::new(chars[idx].to_string())))
+}
+
+/// Returns the index of the first occurrence of the specified substring.
+/// Returns -1 if not found.
+///
+/// # Example
+/// ```cel
+/// "abc".indexOf("b") == 1
+/// ```
+pub fn index_of(This(this): This<Arc<String>>, substr: Arc<String>) -> Result<Value> {
+    let index = match this.find(substr.as_str()) {
+        Some(index) => index as i64,
+        None => -1,
+    };
+    Ok(Value::Int(index))
+}
+
+/// Returns the index of the last occurrence of the specified substring.
+/// Returns -1 if not found.
+///
+/// # Example
+/// ```cel
+/// "abcabc".lastIndexOf("b") == 4
+/// ```
+pub fn last_index_of(This(this): This<Arc<String>>, substr: Arc<String>) -> Result<Value> {
+    let index = match this.rfind(substr.as_str()) {
+        Some(index) => index as i64,
+        None => -1,
+    };
+    Ok(Value::Int(index))
+}
+
+/// Returns a quoted string literal representation of the input string.
+/// Escapes special characters appropriately.
+///
+/// # Example
+/// ```cel
+/// quote("hello\nworld") == "\"hello\\nworld\""
+/// ```
+pub fn quote(This(this): This<Arc<String>>) -> Result<Value> {
+    let escaped = this
+        .chars()
+        .map(|c| match c {
+            '"' => "\\\"".to_string(),
+            '\\' => "\\\\".to_string(),
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            '\u{08}' => "\\b".to_string(),  // backspace
+            '\u{0C}' => "\\f".to_string(),  // form feed
+            c if c.is_control() => format!("\\u{{{:04X}}}", c as u32),
+            c => c.to_string(),
+        })
+        .collect::<String>();
+    
+    Ok(Value::String(Arc::new(format!("\"{}\"", escaped))))
+}
+
+/// Returns true if the value is NaN.
+pub fn is_nan(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Float(f) => Ok(Value::Bool(f.is_nan())),
+        Value::Int(_) | Value::UInt(_) => Ok(Value::Bool(false)),
+        v => Err(ftx.error(format!("isNaN not supported for {v:?}"))),
+    }
+}
+
+/// Returns the sign of the number: -1 for negative, 0 for zero, 1 for positive.
+pub fn sign(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Int(i) => Ok(Value::Int(i.signum())),
+        Value::UInt(u) => Ok(Value::Int(if u == 0 { 0 } else { 1 })),
+        Value::Float(f) => {
+            if f.is_nan() {
+                Ok(Value::Float(f))
+            } else if f > 0.0 {
+                Ok(Value::Int(1))
+            } else if f < 0.0 {
+                Ok(Value::Int(-1))
+            } else {
+                Ok(Value::Int(0))
+            }
+        },
+        v => Err(ftx.error(format!("sign not supported for {v:?}"))),
+    }
+}
+
+/// Splits a string by a delimiter.
+pub fn split(This(this): This<Arc<String>>, delimiter: Arc<String>) -> Result<Value> {
+    let parts: Vec<Value> = this
+        .split(delimiter.as_str())
+        .map(|part| Value::String(Arc::new(part.to_string())))
+        .collect();
+    Ok(Value::List(Arc::new(parts)))
+}
+
+/// Returns a substring of the string from start index to end index.
+pub fn substring(ftx: &FunctionContext, This(this): This<Arc<String>>, start: i64, end: i64) -> Result<Value> {
+    if start < 0 {
+        return Err(ftx.error(format!("substring start index {} is negative", start)));
+    }
+    if end < 0 {
+        return Err(ftx.error(format!("substring end index {} is negative", end)));
+    }
+    if start > end {
+        return Err(ftx.error(format!("substring start index {} is greater than end index {}", start, end)));
+    }
+    
+    let chars: Vec<char> = this.chars().collect();
+    let start_idx = start as usize;
+    let end_idx = end as usize;
+    
+    if start_idx >= chars.len() {
+        return Ok(Value::String(Arc::new(String::new())));
+    }
+    
+    let end_idx = end_idx.min(chars.len());
+    let substring: String = chars[start_idx..end_idx].iter().collect();
+    
+    Ok(Value::String(Arc::new(substring)))
+}
+
+/// Trims whitespace from both ends of the string.
+pub fn trim(This(this): This<Arc<String>>) -> Result<Value> {
+    Ok(Value::String(Arc::new(this.trim().to_string())))
 }
 
 /// Returns true if a string matches the regular expression.
