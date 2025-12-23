@@ -711,10 +711,342 @@ pub fn optional_flat_map(ftx: &FunctionContext, This(this): This<Value>) -> Resu
     }
 }
 
-/// String formatting function (simplified - full implementation would need format spec parsing).
-pub fn format(ftx: &FunctionContext, _format_str: Value, _args: Arguments) -> Result<Value> {
-    // For now, return an error - this needs proper format string parsing
-    Err(ftx.error("format() not yet fully implemented - requires format string parsing"))
+/// String formatting function.
+/// Called as: "format string".format([arg1, arg2, ...])
+/// Supports printf-style format specifiers: %s, %d, %f, %e, %x, %X, %o, %b, %%
+pub fn format(ftx: &FunctionContext, This(this): This<Value>, args: Arguments) -> Result<Value> {
+    // Get the format string
+    let format_str = match &this {
+        Value::String(s) => s.as_str(),
+        _ => return Err(ftx.error("format() must be called on a string")),
+    };
+    
+    // Get the arguments as a list
+    // Arguments is a tuple struct wrapping Arc<Vec<Value>>
+    let arg_list = if args.0.len() == 1 {
+        match &args.0[0] {
+            Value::List(values) => values.as_ref(),
+            _ => return Err(ftx.error("format() requires a list of arguments")),
+        }
+    } else {
+        return Err(ftx.error("format() requires exactly one argument (a list)"));
+    };
+    
+    let mut result = std::string::String::new();
+    let mut arg_index = 0;
+    let mut chars = format_str.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            // Check for %%
+            if chars.peek() == Some(&'%') {
+                chars.next(); // consume the second %
+                result.push('%');
+                continue;
+            }
+            
+            // Parse format specifier: %[.precision]conversion
+            let mut precision: Option<usize> = None;
+            
+            // Check for precision (e.g., %.3f)
+            if chars.peek() == Some(&'.') {
+                chars.next(); // consume '.'
+                let mut prec_str = std::string::String::new();
+                while let Some(&next_ch) = chars.peek() {
+                    if next_ch.is_ascii_digit() {
+                        prec_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                if !prec_str.is_empty() {
+                    precision = Some(prec_str.parse().unwrap_or(6));
+                }
+            }
+            
+            // Get conversion character
+            let conversion = chars.next().ok_or_else(|| {
+                ftx.error("incomplete format specifier")
+            })?;
+            
+            // Get the argument
+            if arg_index >= arg_list.len() {
+                return Err(ftx.error("not enough arguments for format string"));
+            }
+            let arg = &arg_list[arg_index];
+            arg_index += 1;
+            
+            // Format based on conversion type
+            let formatted = format_value(arg, conversion, precision, ftx)?;
+            result.push_str(&formatted);
+        } else {
+            result.push(ch);
+        }
+    }
+    
+    if arg_index < arg_list.len() {
+        return Err(ftx.error("too many arguments for format string"));
+    }
+    
+    Ok(Value::String(Arc::new(std::string::String::from(result))))
+}
+
+/// Formats a single value according to a conversion specifier.
+fn format_value(
+    value: &Value,
+    conversion: char,
+    precision: Option<usize>,
+    ftx: &FunctionContext,
+) -> std::result::Result<String, ExecutionError> {
+    let default_precision = precision.unwrap_or(6);
+    
+    match (conversion, value) {
+        ('s', _) => {
+            // String conversion - handles all types
+            Ok(format_value_as_string(value))
+        }
+        ('d', Value::Int(i)) => Ok(i.to_string()),
+        ('d', Value::UInt(u)) => Ok(u.to_string()),
+        ('d', Value::Float(f)) => {
+            if f.is_nan() {
+                Ok("NaN".to_string())
+            } else if f.is_infinite() {
+                Ok(if f.is_sign_negative() { "-Infinity".to_string() } else { "Infinity".to_string() })
+            } else {
+                Ok(format!("{}", f))
+            }
+        }
+        ('f', Value::Int(i)) => {
+            format_float(*i as f64, default_precision, false)
+        }
+        ('f', Value::UInt(u)) => {
+            format_float(*u as f64, default_precision, false)
+        }
+        ('f', Value::Float(f)) => {
+            if f.is_nan() {
+                Ok("NaN".to_string())
+            } else if f.is_infinite() {
+                Ok(if f.is_sign_negative() { "-Infinity".to_string() } else { "Infinity".to_string() })
+            } else {
+                format_float(*f, default_precision, false)
+            }
+        }
+        ('e', Value::Int(i)) => {
+            format_float(*i as f64, default_precision, true)
+        }
+        ('e', Value::UInt(u)) => {
+            format_float(*u as f64, default_precision, true)
+        }
+        ('e', Value::Float(f)) => {
+            if f.is_nan() {
+                Ok("NaN".to_string())
+            } else if f.is_infinite() {
+                Ok(if f.is_sign_negative() { "-Infinity".to_string() } else { "Infinity".to_string() })
+            } else {
+                format_float(*f, default_precision, true)
+            }
+        }
+        ('x', Value::Int(i)) => {
+            if *i < 0 {
+                Ok(format!("-{:x}", (-i) as u64))
+            } else {
+                Ok(format!("{:x}", *i as u64))
+            }
+        }
+        ('x', Value::UInt(u)) => Ok(format!("{:x}", u)),
+        ('x', Value::String(s)) => {
+            // Convert string to bytes and format as hex
+            Ok(s.as_bytes().iter().map(|b| format!("{:02x}", b)).collect())
+        }
+        ('x', Value::Bytes(b)) => {
+            Ok(b.as_slice().iter().map(|b| format!("{:02x}", b)).collect())
+        }
+        ('X', Value::Int(i)) => {
+            if *i < 0 {
+                Ok(format!("-{:X}", (-i) as u64))
+            } else {
+                Ok(format!("{:X}", *i as u64))
+            }
+        }
+        ('X', Value::UInt(u)) => Ok(format!("{:X}", u)),
+        ('X', Value::String(s)) => {
+            // Convert string to bytes and format as hex
+            Ok(s.as_bytes().iter().map(|b| format!("{:02X}", b)).collect())
+        }
+        ('X', Value::Bytes(b)) => {
+            Ok(b.as_slice().iter().map(|b| format!("{:02X}", b)).collect())
+        }
+        ('o', Value::Int(i)) => {
+            if *i < 0 {
+                Ok(format!("-{:o}", (-i) as u64))
+            } else {
+                Ok(format!("{:o}", *i as u64))
+            }
+        }
+        ('o', Value::UInt(u)) => Ok(format!("{:o}", u)),
+        ('b', Value::Int(i)) => {
+            if *i < 0 {
+                Ok(format!("-{:b}", (-i) as u64))
+            } else {
+                Ok(format!("{:b}", *i as u64))
+            }
+        }
+        ('b', Value::UInt(u)) => Ok(format!("{:b}", u)),
+        ('b', Value::Bool(b)) => Ok(if *b { "1".to_string() } else { "0".to_string() }),
+        _ => Err(ftx.error(format!("unsupported format specifier %{} for value type", conversion))),
+    }
+}
+
+/// Formats a float with the given precision.
+/// Uses banker's rounding (round half to even).
+fn format_float(f: f64, precision: usize, scientific: bool) -> std::result::Result<String, ExecutionError> {
+    if precision == 0 {
+        if scientific {
+            // For %e with precision 0, we still need the decimal point
+            Ok(format!("{:.0e}", f))
+        } else {
+            // For %f with precision 0, no decimal point
+            Ok(format!("{:.0}", f))
+        }
+    } else if scientific {
+        // Scientific notation: d.dddddde±dd
+        // Rust's format! with 'e' doesn't always include the + sign, so we need to handle it
+        let formatted = format!("{:.*e}", precision, f);
+        // Ensure the exponent has 2 digits and always includes the sign
+        if let Some(e_pos) = formatted.find('e') {
+            let (mantissa, exp_part) = formatted.split_at(e_pos);
+            let exp_str = if exp_part.starts_with("e+") {
+                let exp_num: i32 = exp_part[2..].parse().unwrap_or(0);
+                format!("e+{:02}", exp_num)
+            } else if exp_part.starts_with("e-") {
+                let exp_num: i32 = exp_part[2..].parse().unwrap_or(0);
+                format!("e-{:02}", exp_num)
+            } else if exp_part.len() > 1 && exp_part[1..].chars().next().unwrap().is_ascii_digit() {
+                // Handle case where Rust omits the + sign (e.g., "e3" instead of "e+03")
+                let exp_num: i32 = exp_part[1..].parse().unwrap_or(0);
+                if exp_num >= 0 {
+                    format!("e+{:02}", exp_num)
+                } else {
+                    format!("e-{:02}", -exp_num)
+                }
+            } else {
+                exp_part.to_string()
+            };
+            Ok(format!("{}{}", mantissa, exp_str))
+        } else {
+            Ok(formatted)
+        }
+    } else {
+        // Fixed point: dddddd.dddddd
+        Ok(format!("{:.*}", precision, f))
+    }
+}
+
+/// Formats a value as a string (for %s conversion).
+/// This handles all types including lists, maps, timestamps, durations, etc.
+fn format_value_as_string(value: &Value) -> String {
+    use crate::objects::Value::*;
+    
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::UInt(u) => u.to_string(),
+        Value::Float(f) => {
+            if f.is_nan() {
+                "NaN".to_string()
+            } else if f.is_infinite() {
+                if f.is_sign_negative() {
+                    "-Infinity".to_string()
+                } else {
+                    "Infinity".to_string()
+                }
+            } else {
+                // Remove trailing zeros and decimal point if not needed
+                let s = f.to_string();
+                if s.contains('.') {
+                    s.trim_end_matches('0').trim_end_matches('.').to_string()
+                } else {
+                    s
+                }
+            }
+        }
+        Value::String(s) => s.as_str().to_string(),
+        Value::Bytes(b) => {
+            // Convert bytes to string using from_utf8_lossy
+            std::string::String::from_utf8_lossy(b.as_slice()).replace('\u{fffd}', "\u{fffd}")
+        }
+        Value::List(list) => {
+            let items: Vec<std::string::String> = list.iter().map(|v| format_value_as_string(v)).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Value::Map(map) => {
+            // Sort keys by their string representation
+            let mut entries: Vec<(std::string::String, std::string::String)> = map.map.iter()
+                .map(|(k, v)| (format_key_as_string(k), format_value_as_string(v)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let pairs: Vec<std::string::String> = entries.iter()
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        Value::Struct(s) => {
+            // Format struct fields
+            let mut entries: Vec<(std::string::String, std::string::String)> = s.fields.iter()
+                .map(|(k, v): (&std::string::String, &Value)| (k.clone(), format_value_as_string(v)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let pairs: Vec<std::string::String> = entries.iter()
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        #[cfg(feature = "chrono")]
+        Value::Timestamp(t) => {
+            // Format as RFC3339 in UTC
+            t.to_utc().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        }
+        #[cfg(feature = "chrono")]
+        Value::Duration(d) => {
+            // Format as decimal seconds
+            let total_secs = d.num_seconds();
+            let nanos = d.num_nanoseconds().unwrap_or(0) % 1_000_000_000;
+            if nanos == 0 {
+                format!("{}s", total_secs)
+            } else {
+                // Include fractional seconds
+                let frac = (nanos as f64) / 1_000_000_000.0;
+                let total = total_secs as f64 + frac;
+                format!("{}s", total)
+            }
+        }
+        // Dyn values are wrapped in Opaque, handle them there
+        Value::Function(_, _) => "<function>".to_string(),
+        Value::Opaque(_) => {
+            // Try to convert OptionalValue
+            if let Ok(opt) = <&OptionalValue>::try_from(value) {
+                if let Some(inner) = opt.value() {
+                    format_value_as_string(inner)
+                } else {
+                    "null".to_string()
+                }
+            } else {
+                "<opaque>".to_string()
+            }
+        }
+    }
+}
+
+/// Formats a map key as a string.
+fn format_key_as_string(key: &crate::objects::Key) -> String {
+    use crate::objects::Key::*;
+    match key {
+        Int(i) => i.to_string(),
+        Uint(u) => u.to_string(),
+        String(s) => s.as_str().to_string(),
+        Bool(b) => b.to_string(),
+    }
 }
 
 #[cfg(test)]
