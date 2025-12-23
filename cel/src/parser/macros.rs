@@ -15,9 +15,9 @@ pub fn find_expander(
 ) -> Option<MacroExpander> {
     match func_name {
         operators::HAS if args.len() == 1 && target.is_none() => Some(has_macro_expander),
-        operators::EXISTS if args.len() == 2 && target.is_some() => Some(exists_macro_expander),
-        operators::ALL if args.len() == 2 && target.is_some() => Some(all_macro_expander),
-        operators::EXISTS_ONE | "existsOne" if args.len() == 2 && target.is_some() => {
+        operators::EXISTS if (args.len() == 2 || args.len() == 3) && target.is_some() => Some(exists_macro_expander),
+        operators::ALL if (args.len() == 2 || args.len() == 3) && target.is_some() => Some(all_macro_expander),
+        operators::EXISTS_ONE | "existsOne" if (args.len() == 2 || args.len() == 3) && target.is_some() => {
             Some(exists_one_macro_expander)
         }
         operators::MAP if (args.len() == 2 || args.len() == 3) && target.is_some() => {
@@ -64,13 +64,25 @@ fn exists_macro_expander(
     if target.is_none() {
         unreachable!("Expected a target, but got `None`!")
     }
-    if args.len() != 2 {
-        unreachable!("Expected two args!")
+    if args.len() != 2 && args.len() != 3 {
+        unreachable!("Expected two or three args!")
     }
 
-    let mut arguments = vec![args.remove(1)];
-    let v = extract_ident(args.remove(0), helper)?;
+    let (iter_var, iter_var2, condition) = if args.len() == 3 {
+        // 3-parameter form: exists(index_var, value_var, condition)
+        let condition = args.remove(2);
+        let value_var = extract_ident(args.remove(1), helper)?;
+        let index_var = extract_ident(args.remove(0), helper)?;
+        (index_var, Some(value_var), condition)
+    } else {
+        // 2-parameter form: exists(var, condition)  
+        let condition = args.remove(1);
+        let var = extract_ident(args.remove(0), helper)?;
+        (var, None, condition)
+    };
 
+    let mut arguments = vec![condition];
+    
     let init = helper.next_expr(Expr::Literal(Boolean(false)));
     let result_binding = "@result".to_string();
     let accu_ident = helper.next_expr(Expr::Ident(result_binding.clone()));
@@ -79,7 +91,7 @@ fn exists_macro_expander(
         target: None,
         args: vec![accu_ident],
     }));
-    let condition = helper.next_expr(Expr::Call(CallExpr {
+    let loop_condition = helper.next_expr(Expr::Call(CallExpr {
         func_name: operators::NOT_STRICTLY_FALSE.to_string(),
         target: None,
         args: vec![arg],
@@ -97,11 +109,11 @@ fn exists_macro_expander(
     Ok(
         helper.next_expr(Expr::Comprehension(Box::new(ComprehensionExpr {
             iter_range: target.unwrap(),
-            iter_var: v,
-            iter_var2: None,
+            iter_var,
+            iter_var2,
             accu_var: result_binding,
             accu_init: init,
-            loop_cond: condition,
+            loop_cond: loop_condition,
             loop_step: step,
             result,
         }))),
@@ -115,17 +127,29 @@ fn all_macro_expander(
     if target.is_none() {
         unreachable!("Expected a target, but got `None`!")
     }
-    if args.len() != 2 {
-        unreachable!("Expected two args!")
+    if args.len() != 2 && args.len() != 3 {
+        unreachable!("Expected two or three args!")
     }
 
-    let mut arguments = vec![args.remove(1)];
-    let v = extract_ident(args.remove(0), helper)?;
+    let (iter_var, iter_var2, condition) = if args.len() == 3 {
+        // 3-parameter form: all(index_var, value_var, condition)
+        let condition = args.remove(2);
+        let value_var = extract_ident(args.remove(1), helper)?;
+        let index_var = extract_ident(args.remove(0), helper)?;
+        (index_var, Some(value_var), condition)
+    } else {
+        // 2-parameter form: all(var, condition)
+        let condition = args.remove(1);
+        let var = extract_ident(args.remove(0), helper)?;
+        (var, None, condition)
+    };
+
+    let mut arguments = vec![condition];
 
     let init = helper.next_expr(Expr::Literal(Boolean(true)));
     let result_binding = "@result".to_string();
     let accu_ident = helper.next_expr(Expr::Ident(result_binding.clone()));
-    let condition = helper.next_expr(Expr::Call(CallExpr {
+    let loop_condition = helper.next_expr(Expr::Call(CallExpr {
         func_name: operators::NOT_STRICTLY_FALSE.to_string(),
         target: None,
         args: vec![accu_ident],
@@ -143,11 +167,11 @@ fn all_macro_expander(
     Ok(
         helper.next_expr(Expr::Comprehension(Box::new(ComprehensionExpr {
             iter_range: target.unwrap(),
-            iter_var: v,
-            iter_var2: None,
+            iter_var,
+            iter_var2,
             accu_var: result_binding,
             accu_init: init,
-            loop_cond: condition,
+            loop_cond: loop_condition,
             loop_step: step,
             result,
         }))),
@@ -162,12 +186,24 @@ fn exists_one_macro_expander(
     if target.is_none() {
         unreachable!("Expected a target, but got `None`!")
     }
-    if args.len() != 2 {
-        unreachable!("Expected two args!")
+    if args.len() != 2 && args.len() != 3 {
+        unreachable!("Expected two or three args!")
     }
 
-    let mut arguments = vec![args.remove(1)];
-    let v = extract_ident(args.remove(0), helper)?;
+    let (iter_var, iter_var2, condition) = if args.len() == 3 {
+        // 3-parameter form: existsOne(index_var, value_var, condition)
+        let condition = args.remove(2);
+        let value_var = extract_ident(args.remove(1), helper)?;
+        let index_var = extract_ident(args.remove(0), helper)?;
+        (index_var, Some(value_var), condition)
+    } else {
+        // 2-parameter form: existsOne(var, condition)
+        let condition = args.remove(1);
+        let var = extract_ident(args.remove(0), helper)?;
+        (var, None, condition)
+    };
+
+    let mut arguments = vec![condition];
 
     let init = helper.next_expr(Expr::Literal(Int(0)));
     let result_binding = "@result".to_string();
@@ -201,8 +237,8 @@ fn exists_one_macro_expander(
     Ok(
         helper.next_expr(Expr::Comprehension(Box::new(ComprehensionExpr {
             iter_range: target.unwrap(),
-            iter_var: v,
-            iter_var2: None,
+            iter_var,
+            iter_var2,
             accu_var: result_binding,
             accu_init: init,
             loop_cond: condition,

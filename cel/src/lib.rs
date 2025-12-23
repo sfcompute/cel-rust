@@ -113,6 +113,8 @@ pub enum ExecutionError {
     Overflow(&'static str, Value, Value),
     #[error("Index out of bounds: {0:?}")]
     IndexOutOfBounds(Value),
+    #[error("Failed with repeated key")]
+    DuplicateKey(Value),
 }
 
 impl ExecutionError {

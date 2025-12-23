@@ -259,6 +259,13 @@ impl Default for Context<'_> {
         ctx.add_function("math.ceil", functions::ceil);
         ctx.add_function("math.trunc", functions::trunc);
         ctx.add_function("math.isFinite", functions::is_finite);
+        ctx.add_function("math.isInf", functions::is_inf);
+        ctx.add_function("math.bitOr", functions::bit_or);
+        ctx.add_function("math.bitXor", functions::bit_xor);
+        ctx.add_function("math.bitAnd", functions::bit_and);
+        ctx.add_function("math.bitNot", functions::bit_not);
+        ctx.add_function("math.bitShiftLeft", functions::bit_shift_left);
+        ctx.add_function("math.bitShiftRight", functions::bit_shift_right);
         ctx.add_function("lowerAscii", functions::lower_ascii);
         ctx.add_function("upperAscii", functions::upper_ascii);
         ctx.add_function("reverse", functions::reverse);
@@ -275,6 +282,7 @@ impl Default for Context<'_> {
         ctx.add_variable("bytes", Value::String(Arc::new("bytes".to_string())));
         ctx.add_variable("list", Value::String(Arc::new("list".to_string())));
         ctx.add_variable("map", Value::String(Arc::new("map".to_string())));
+        ctx.add_variable("math", Value::String(Arc::new("math".to_string())));
         
         // Google protobuf type constants
         ctx.add_variable("google.protobuf.Timestamp", Value::String(Arc::new("google.protobuf.Timestamp".to_string())));

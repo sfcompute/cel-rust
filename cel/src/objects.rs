@@ -627,6 +627,32 @@ impl PartialEq for Value {
             {
                 true
             }
+            // Empty protobuf wrapper types equal their default values
+            (Value::Struct(ref s), other) | (other, Value::Struct(ref s)) => {
+                if s.type_name.as_str().starts_with("google.protobuf.") && 
+                   s.type_name.as_str().ends_with("Value") {
+                    if s.fields.is_empty() {
+                        // Empty wrapper equals its default value
+                        let default_value = match s.type_name.as_str() {
+                            "google.protobuf.BoolValue" => Value::Bool(false),
+                            "google.protobuf.StringValue" => Value::String(Arc::new(String::new())),
+                            "google.protobuf.BytesValue" => Value::Bytes(Arc::new(Vec::new())),
+                            "google.protobuf.DoubleValue" => Value::Float(0.0),
+                            "google.protobuf.FloatValue" => Value::Float(0.0),
+                            "google.protobuf.Int64Value" => Value::Int(0),
+                            "google.protobuf.UInt64Value" => Value::UInt(0),
+                            "google.protobuf.Int32Value" => Value::Int(0),
+                            "google.protobuf.UInt32Value" => Value::UInt(0),
+                            _ => return false,
+                        };
+                        return default_value.eq(other);
+                    } else if let Some(value) = s.fields.get("value") {
+                        // Non-empty wrapper equals its unwrapped value
+                        return value.eq(other);
+                    }
+                }
+                false
+            }
             #[cfg(feature = "chrono")]
             (Value::Duration(a), Value::Duration(b)) => a == b,
             #[cfg(feature = "chrono")]
@@ -934,8 +960,9 @@ impl Value {
                             }
                         }
                         operators::LOGICAL_OR => {
-                            // CEL semantics: if left side is truthy, return it (short-circuit)
-                            // If left side errors, still evaluate right side (errors are ignored if result is determined)
+                            // CEL semantics for ||: 
+                            // If left is truthy, return it (short-circuit)
+                            // If left errors, evaluate right - if right is truthy, return it; otherwise return error
                             match Value::resolve(&call.args[0], ctx) {
                                 Ok(left) => {
                                     if left.to_bool().unwrap_or(false) {
@@ -944,66 +971,55 @@ impl Value {
                                     // Left is false, evaluate right
                                     return Value::resolve(&call.args[1], ctx);
                                 }
-                                Err(_) => {
-                                    // Left side errored, but we still evaluate right side
-                                    // If right side is truthy, return it (errors are ignored)
+                                Err(left_error) => {
+                                    // Left errored, check if right can determine the result
                                     match Value::resolve(&call.args[1], ctx) {
                                         Ok(right) => {
                                             if right.to_bool().unwrap_or(false) {
+                                                // Right is truthy, return it (error is masked)
                                                 return Ok(right.into());
                                             }
-                                            // Right is also false, return false
-                                            return Ok(Value::Bool(false).into());
+                                            // Right is falsy, propagate left error
+                                            return Err(left_error);
                                         }
                                         Err(_) => {
-                                            // Both sides errored, but OR can still return false
-                                            // In CEL, if both error, we return false
-                                            return Ok(Value::Bool(false).into());
+                                            // Both sides errored, propagate left error
+                                            return Err(left_error);
                                         }
                                     }
                                 }
                             }
                         }
                         operators::LOGICAL_AND => {
-                            // CEL semantics: if left side is falsy, return false (short-circuit)
-                            // If left side errors, still evaluate right side (errors are ignored if result is determined)
-                            let left_result = Value::resolve(&call.args[0], ctx);
-                            match left_result {
+                            // CEL semantics for &&:
+                            // If left is false, return false (short-circuit)
+                            // If left errors, evaluate right - if right is false, return false; otherwise return error
+                            match Value::resolve(&call.args[0], ctx) {
                                 Ok(left) => {
                                     if !left.to_bool().unwrap_or(false) {
+                                        // Left is false, short-circuit to false
                                         return Ok(Value::Bool(false).into());
                                     }
                                     // Left is true, evaluate right
-                                    let right_result = Value::resolve(&call.args[1], ctx);
-                                    match right_result {
-                                        Ok(right) => {
-                                            return Ok(Value::Bool(
-                                                right.to_bool().unwrap_or(false),
-                                            )
-                                            .into())
-                                        }
-                                        Err(_) => {
-                                            // Right errored, but left was true
-                                            // In CEL, if right errors, we return false
-                                            return Ok(Value::Bool(false).into());
-                                        }
+                                    match Value::resolve(&call.args[1], ctx) {
+                                        Ok(right) => return Ok(Value::Bool(right.to_bool().unwrap_or(false)).into()),
+                                        Err(right_error) => return Err(right_error), // Propagate right side errors
                                     }
                                 }
-                                Err(_) => {
-                                    // Left side errored, but we still evaluate right side
-                                    let right_result = Value::resolve(&call.args[1], ctx);
-                                    match right_result {
+                                Err(left_error) => {
+                                    // Left errored, check if right can determine the result
+                                    match Value::resolve(&call.args[1], ctx) {
                                         Ok(right) => {
                                             if !right.to_bool().unwrap_or(false) {
-                                                // Right is false, so AND is false
+                                                // Right is false, return false (error is masked)
                                                 return Ok(Value::Bool(false).into());
                                             }
-                                            // Right is true, but left errored, so AND is false
-                                            return Ok(Value::Bool(false).into());
+                                            // Right is true, propagate left error
+                                            return Err(left_error);
                                         }
                                         Err(_) => {
-                                            // Both sides errored, AND returns false
-                                            return Ok(Value::Bool(false).into());
+                                            // Both sides errored, propagate left error
+                                            return Err(left_error);
                                         }
                                     }
                                 }
@@ -1310,10 +1326,27 @@ impl Value {
                         EntryExpr::StructField(_) => panic!("WAT?"),
                         EntryExpr::MapEntry(e) => (&e.key, &e.value, e.optional),
                     };
-                    let key = Value::resolve(k, ctx)?
+                    let key: Key = Value::resolve(k, ctx)?
                         .try_into()
                         .map_err(ExecutionError::UnsupportedKeyType)?;
                     let value = Value::resolve(v, ctx)?;
+
+                    // Check for duplicate keys, including numerically equivalent int/uint keys
+                    let is_duplicate = match &key {
+                        Key::Int(i) => {
+                            map.contains_key(&key) || 
+                            (*i >= 0 && map.contains_key(&Key::Uint(*i as u64)))
+                        }
+                        Key::Uint(u) => {
+                            map.contains_key(&key) || 
+                            (*u <= i64::MAX as u64 && map.contains_key(&Key::Int(*u as i64)))
+                        }
+                        _ => map.contains_key(&key),
+                    };
+
+                    if is_duplicate {
+                        return Err(ExecutionError::DuplicateKey(key.clone().into()));
+                    }
 
                     if is_optional {
                         if let Ok(opt_val) = <&OptionalValue>::try_from(&value) {
@@ -1340,23 +1373,53 @@ impl Value {
 
                 match iter {
                     Value::List(items) => {
-                        for item in items.deref() {
-                            if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                break;
+                        if let Some(ref iter_var2) = comprehension.iter_var2 {
+                            // 3-parameter form: iterate with index and value
+                            for (index, item) in items.deref().iter().enumerate() {
+                                if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                                    break;
+                                }
+                                // iter_var = index, iter_var2 = value
+                                ctx.add_variable_from_value(&comprehension.iter_var, Value::Int(index as i64));
+                                ctx.add_variable_from_value(iter_var2, item.clone());
+                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
+                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
                             }
-                            ctx.add_variable_from_value(&comprehension.iter_var, item.clone());
-                            let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
-                            ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                        } else {
+                            // 2-parameter form: iterate with value only
+                            for item in items.deref() {
+                                if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                                    break;
+                                }
+                                ctx.add_variable_from_value(&comprehension.iter_var, item.clone());
+                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
+                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                            }
                         }
                     }
                     Value::Map(map) => {
-                        for key in map.map.deref().keys() {
-                            if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                break;
+                        if let Some(ref iter_var2) = comprehension.iter_var2 {
+                            // 3-parameter form: iterate with key and value
+                            for (key, value) in map.map.deref() {
+                                if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                                    break;
+                                }
+                                // iter_var = key, iter_var2 = value
+                                ctx.add_variable_from_value(&comprehension.iter_var, key.clone());
+                                ctx.add_variable_from_value(iter_var2, value.clone());
+                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
+                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
                             }
-                            ctx.add_variable_from_value(&comprehension.iter_var, key.clone());
-                            let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
-                            ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                        } else {
+                            // 2-parameter form: iterate with key only
+                            for key in map.map.deref().keys() {
+                                if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                                    break;
+                                }
+                                ctx.add_variable_from_value(&comprehension.iter_var, key.clone());
+                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
+                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                            }
                         }
                     }
                     t => todo!("Support {t:?}"),
@@ -1413,13 +1476,14 @@ impl Value {
 
     fn member(self, name: &str) -> ResolveResult {
         // Handle OptionalValue - unwrap it first, then access the member
-        // If the member access fails, return optional.none() instead of an error
-        // This allows chaining like optional.of(map).c.missing.or(...)
+        // If the OptionalValue contains None, return optional.none()
+        // If the OptionalValue contains Some(value) but member access fails, propagate the error
+        // This ensures field access errors are not swallowed by optional chaining
         if let Ok(opt_val) = <&OptionalValue>::try_from(&self) {
             return match opt_val.value() {
                 Some(inner) => match inner.clone().member(name) {
                     Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
-                    Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+                    Err(e) => Err(e), // Propagate field access errors instead of converting to none
                 },
                 None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
             };
@@ -1496,6 +1560,14 @@ impl Value {
     fn to_bool(&self) -> Result<bool, ExecutionError> {
         match self {
             Value::Bool(v) => Ok(*v),
+            Value::Int(v) => Ok(*v != 0),
+            Value::UInt(v) => Ok(*v != 0),
+            Value::Float(v) => Ok(*v != 0.0 && !v.is_nan()),
+            Value::String(s) => Ok(!s.is_empty()),
+            Value::Bytes(b) => Ok(!b.is_empty()),
+            Value::List(l) => Ok(!l.is_empty()),
+            Value::Map(m) => Ok(!m.map.is_empty()),
+            Value::Null => Ok(false),
             _ => Err(ExecutionError::NoSuchOverload),
         }
     }
