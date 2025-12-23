@@ -282,11 +282,13 @@ fn parse_quoted_string(
                         '\\' => c2,
                         '?' => c2,
                         '\'' => {
-                            push_escape_character = in_double_quotes;
+                            // In double quotes, \' doesn't need escaping, so don't push backslash
+                            push_escape_character = false;
                             c2
                         }
                         '"' => {
-                            push_escape_character = in_single_quotes;
+                            // In single quotes, \" doesn't need escaping, so don't push backslash
+                            push_escape_character = false;
                             c2
                         }
                         '`' => c2,
@@ -458,7 +460,7 @@ mod tests {
             ("\"Hello \\\\\"", Ok(String::from("Hello \\"))),
             ("\"Hello \\?\"", Ok(String::from("Hello ?"))),
             ("\"Hello \\\"\"", Ok(String::from("Hello \""))),
-            ("\"Hello \\'\"", Ok(String::from("Hello \\'"))),
+            ("\"Hello \\'\"", Ok(String::from("Hello '"))),
             ("\"Hello \\`\"", Ok(String::from("Hello `"))),
             ("\"Hello \\x20 \"", Ok(String::from("Hello   "))),
             ("\"Hello \\x60\"", Ok(String::from("Hello `"))),

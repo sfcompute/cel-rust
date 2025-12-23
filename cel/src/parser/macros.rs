@@ -1,4 +1,4 @@
-use crate::common::ast::{operators, CallExpr, ComprehensionExpr, Expr, IdedExpr, ListExpr};
+use crate::common::ast::{operators, BindExpr, CallExpr, ComprehensionExpr, Expr, IdedExpr, ListExpr};
 use crate::common::value::CelVal::{Boolean, Int};
 use crate::parser::{MacroExprHelper, ParseError};
 
@@ -24,6 +24,7 @@ pub fn find_expander(
             Some(map_macro_expander)
         }
         operators::FILTER if args.len() == 2 && target.is_some() => Some(filter_macro_expander),
+        operators::BIND if args.len() == 3 && target.is_some() => Some(bind_macro_expander),
         _ => None,
     }
 }
@@ -358,6 +359,50 @@ fn filter_macro_expander(
             result,
         }))),
     )
+}
+
+fn bind_macro_expander(
+    helper: &mut MacroExprHelper,
+    target: Option<IdedExpr>,
+    mut args: Vec<IdedExpr>,
+) -> Result<IdedExpr, ParseError> {
+    if target.is_none() {
+        unreachable!("Expected a target (cel), but got `None`!")
+    }
+    if args.len() != 3 {
+        unreachable!("Expected three args!")
+    }
+
+    // Validate that target is the identifier "cel"
+    let target = target.unwrap();
+    match &target.expr {
+        Expr::Ident(name) if name == "cel" => {
+            // Valid cel.bind(...) call
+        }
+        _ => {
+            return Err(ParseError {
+                source: None,
+                pos: helper.pos_for(target.id).unwrap_or_default(),
+                msg: "bind macro must be called as cel.bind(...)".to_string(),
+                expr_id: 0,
+                source_info: None,
+            });
+        }
+    }
+
+    // Extract arguments
+    let var_expr = args.remove(0);
+    let init = args.remove(0);
+    let result = args.remove(0);
+
+    // First argument must be a simple identifier
+    let var = extract_ident(var_expr, helper)?;
+
+    Ok(helper.next_expr(Expr::Bind(Box::new(BindExpr {
+        var,
+        init,
+        result,
+    }))))
 }
 
 fn extract_ident(expr: IdedExpr, helper: &mut MacroExprHelper) -> Result<String, ParseError> {

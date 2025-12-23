@@ -2238,6 +2238,16 @@ ERROR: <input>:1:24: unsupported syntax '?'
                     self.push("}");
                     &format!("^#{}:{}#", expr.id, "*expr.Expr_StructExpr")
                 }
+                Expr::Bind(bind_expr) => {
+                    self.push("cel.bind(");
+                    self.push(&bind_expr.var);
+                    self.push(", ");
+                    self.buffer(&bind_expr.init);
+                    self.push(", ");
+                    self.buffer(&bind_expr.result);
+                    self.push(")");
+                    &format!("^#{}:{}#", expr.id, "*expr.Expr_Bind")
+                }
             };
             self.push(e);
             self

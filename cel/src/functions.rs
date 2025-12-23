@@ -1475,7 +1475,12 @@ pub fn bit_shift_right(ftx: &FunctionContext, left: Value, right: Value) -> Resu
 /// Absolute value function.
 pub fn abs(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     match this {
-        Value::Int(i) => Ok(Value::Int(i.abs())),
+        Value::Int(i) => {
+            // checked_abs returns None if i == i64::MIN
+            i.checked_abs()
+                .map(Value::Int)
+                .ok_or_else(|| ftx.error("integer overflow in abs()".to_string()))
+        }
         Value::UInt(u) => Ok(Value::UInt(u)), // UInt is always positive
         Value::Float(f) => Ok(Value::Float(f.abs())),
         v => Err(ftx.error(format!("abs not supported for {v:?}"))),

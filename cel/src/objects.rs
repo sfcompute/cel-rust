@@ -1426,6 +1426,17 @@ impl Value {
                 }
                 Value::resolve(&comprehension.result, &ctx)
             }
+            Expr::Bind(bind_expr) => {
+                // Evaluate the initialization expression
+                let init_value = Value::resolve(&bind_expr.init, ctx)?;
+
+                // Create new scope with the bound variable
+                let mut ctx = ctx.new_inner_scope();
+                ctx.add_variable_from_value(&bind_expr.var, init_value);
+
+                // Evaluate and return the result expression in the new scope
+                Value::resolve(&bind_expr.result, &ctx)
+            }
             Expr::Struct(struct_expr) => {
                 let mut fields = HashMap::with_capacity(struct_expr.entries.len());
                 for entry in struct_expr.entries.iter() {
@@ -1504,7 +1515,11 @@ impl Value {
                     // For proto2, unset optional fields have default values
                     // Try to infer the default from the field name
                     // This is a heuristic - ideally we'd have type information
-                    if name.contains("map") || name.contains("Map") {
+
+                    // Wrapper type fields (containing "_wrapper") default to null
+                    if name.contains("_wrapper") || name.contains("Wrapper") {
+                        Some(Value::Null)
+                    } else if name.contains("map") || name.contains("Map") {
                         // Map fields default to empty map
                         Some(Value::Map(Map {
                             map: Arc::new(HashMap::new()),

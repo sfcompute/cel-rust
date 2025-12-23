@@ -412,40 +412,56 @@ fn convert_test_all_types_proto3_to_struct(
 
     let mut fields = HashMap::new();
 
-    // Wrapper types are already decoded by prost - just convert them to CEL values
-    if let Some(val) = msg.single_bool_wrapper {
-        fields.insert("single_bool_wrapper".to_string(), Bool(val));
-    }
-    if let Some(ref val) = msg.single_bytes_wrapper {
-        fields.insert(
-            "single_bytes_wrapper".to_string(),
-            Bytes(Arc::new(val.clone())),
-        );
-    }
-    if let Some(val) = msg.single_double_wrapper {
-        fields.insert("single_double_wrapper".to_string(), Float(val));
-    }
-    if let Some(val) = msg.single_float_wrapper {
-        fields.insert("single_float_wrapper".to_string(), Float(val as f64));
-    }
-    if let Some(val) = msg.single_int32_wrapper {
-        fields.insert("single_int32_wrapper".to_string(), Int(val as i64));
-    }
-    if let Some(val) = msg.single_int64_wrapper {
-        fields.insert("single_int64_wrapper".to_string(), Int(val));
-    }
-    if let Some(ref val) = msg.single_string_wrapper {
-        fields.insert(
-            "single_string_wrapper".to_string(),
-            String(Arc::new(val.clone())),
-        );
-    }
-    if let Some(val) = msg.single_uint32_wrapper {
-        fields.insert("single_uint32_wrapper".to_string(), UInt(val as u64));
-    }
-    if let Some(val) = msg.single_uint64_wrapper {
-        fields.insert("single_uint64_wrapper".to_string(), UInt(val));
-    }
+    // Wrapper types are already decoded by prost - convert them to CEL values or Null
+    // Unset wrapper fields should map to Null, not be missing from the struct
+    fields.insert(
+        "single_bool_wrapper".to_string(),
+        msg.single_bool_wrapper.map(Bool).unwrap_or(Null),
+    );
+    fields.insert(
+        "single_bytes_wrapper".to_string(),
+        msg.single_bytes_wrapper
+            .as_ref()
+            .map(|v| Bytes(Arc::new(v.clone())))
+            .unwrap_or(Null),
+    );
+    fields.insert(
+        "single_double_wrapper".to_string(),
+        msg.single_double_wrapper.map(Float).unwrap_or(Null),
+    );
+    fields.insert(
+        "single_float_wrapper".to_string(),
+        msg.single_float_wrapper
+            .map(|v| Float(v as f64))
+            .unwrap_or(Null),
+    );
+    fields.insert(
+        "single_int32_wrapper".to_string(),
+        msg.single_int32_wrapper
+            .map(|v| Int(v as i64))
+            .unwrap_or(Null),
+    );
+    fields.insert(
+        "single_int64_wrapper".to_string(),
+        msg.single_int64_wrapper.map(Int).unwrap_or(Null),
+    );
+    fields.insert(
+        "single_string_wrapper".to_string(),
+        msg.single_string_wrapper
+            .as_ref()
+            .map(|v| String(Arc::new(v.clone())))
+            .unwrap_or(Null),
+    );
+    fields.insert(
+        "single_uint32_wrapper".to_string(),
+        msg.single_uint32_wrapper
+            .map(|v| UInt(v as u64))
+            .unwrap_or(Null),
+    );
+    fields.insert(
+        "single_uint64_wrapper".to_string(),
+        msg.single_uint64_wrapper.map(UInt).unwrap_or(Null),
+    );
 
     // Add other fields
     fields.insert("single_bool".to_string(), Bool(msg.single_bool));
@@ -480,40 +496,56 @@ fn convert_test_all_types_proto2_to_struct(
     let mut fields = HashMap::new();
 
     // Proto2 has optional fields, so we need to check if they're set
-    // Wrapper types are already decoded by prost - just convert them to CEL values
-    if let Some(val) = msg.single_bool_wrapper {
-        fields.insert("single_bool_wrapper".to_string(), Bool(val));
-    }
-    if let Some(ref val) = msg.single_bytes_wrapper {
-        fields.insert(
-            "single_bytes_wrapper".to_string(),
-            Bytes(Arc::new(val.clone())),
-        );
-    }
-    if let Some(val) = msg.single_double_wrapper {
-        fields.insert("single_double_wrapper".to_string(), Float(val));
-    }
-    if let Some(val) = msg.single_float_wrapper {
-        fields.insert("single_float_wrapper".to_string(), Float(val as f64));
-    }
-    if let Some(val) = msg.single_int32_wrapper {
-        fields.insert("single_int32_wrapper".to_string(), Int(val as i64));
-    }
-    if let Some(val) = msg.single_int64_wrapper {
-        fields.insert("single_int64_wrapper".to_string(), Int(val));
-    }
-    if let Some(ref val) = msg.single_string_wrapper {
-        fields.insert(
-            "single_string_wrapper".to_string(),
-            String(Arc::new(val.clone())),
-        );
-    }
-    if let Some(val) = msg.single_uint32_wrapper {
-        fields.insert("single_uint32_wrapper".to_string(), UInt(val as u64));
-    }
-    if let Some(val) = msg.single_uint64_wrapper {
-        fields.insert("single_uint64_wrapper".to_string(), UInt(val));
-    }
+    // Wrapper types are already decoded by prost - convert them to CEL values or Null
+    // Unset wrapper fields should map to Null, not be missing from the struct
+    fields.insert(
+        "single_bool_wrapper".to_string(),
+        msg.single_bool_wrapper.map(Bool).unwrap_or(Null),
+    );
+    fields.insert(
+        "single_bytes_wrapper".to_string(),
+        msg.single_bytes_wrapper
+            .as_ref()
+            .map(|v| Bytes(Arc::new(v.clone())))
+            .unwrap_or(Null),
+    );
+    fields.insert(
+        "single_double_wrapper".to_string(),
+        msg.single_double_wrapper.map(Float).unwrap_or(Null),
+    );
+    fields.insert(
+        "single_float_wrapper".to_string(),
+        msg.single_float_wrapper
+            .map(|v| Float(v as f64))
+            .unwrap_or(Null),
+    );
+    fields.insert(
+        "single_int32_wrapper".to_string(),
+        msg.single_int32_wrapper
+            .map(|v| Int(v as i64))
+            .unwrap_or(Null),
+    );
+    fields.insert(
+        "single_int64_wrapper".to_string(),
+        msg.single_int64_wrapper.map(Int).unwrap_or(Null),
+    );
+    fields.insert(
+        "single_string_wrapper".to_string(),
+        msg.single_string_wrapper
+            .as_ref()
+            .map(|v| String(Arc::new(v.clone())))
+            .unwrap_or(Null),
+    );
+    fields.insert(
+        "single_uint32_wrapper".to_string(),
+        msg.single_uint32_wrapper
+            .map(|v| UInt(v as u64))
+            .unwrap_or(Null),
+    );
+    fields.insert(
+        "single_uint64_wrapper".to_string(),
+        msg.single_uint64_wrapper.map(UInt).unwrap_or(Null),
+    );
 
     // Add other fields (proto2 has defaults)
     fields.insert(
