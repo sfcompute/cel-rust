@@ -75,6 +75,8 @@ impl ConformanceRunner {
             Ok(file) => file,
             Err(crate::textproto::TextprotoParseError::AnyMessageUnsupported(msg)) => {
                 // Some test files contain Any messages that protoc --encode can't handle
+                // At the time of writing there doesn't appear to be a rust library
+                // that both supports textproto and any messages with URLs (descriptor sets)
                 // Skip these files for now with a warning (printed in dim)
                 use std::io::Write;
                 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
@@ -390,10 +392,13 @@ impl TestResults {
 
         // Group by test category based on test name patterns
         let mut category_groups: HashMap<String, Vec<&(String, String)>> = HashMap::new();
-        
+
         for failure in &self.failed {
             let category = categorize_test(&failure.0, &failure.1);
-            category_groups.entry(category).or_insert_with(Vec::new).push(failure);
+            category_groups
+                .entry(category)
+                .or_insert_with(Vec::new)
+                .push(failure);
         }
 
         // Sort categories by count (descending)
@@ -453,7 +458,7 @@ fn categorize_test(name: &str, error: &str) -> String {
             }
             return format!("Undeclared references ({})", ref_name);
         }
-        
+
         if error.contains("FunctionError") && error.contains("Panic") {
             if name.contains("to_any") || name.contains("to_json") || name.contains("to_null") {
                 return "Type conversions (to_any/to_json/to_null)".to_string();
@@ -463,31 +468,31 @@ fn categorize_test(name: &str, error: &str) -> String {
             }
             return "Function panics".to_string();
         }
-        
+
         if error.contains("NoSuchKey") {
             return "Map key access errors".to_string();
         }
-        
+
         if error.contains("UnsupportedBinaryOperator") {
             return "Binary operator errors".to_string();
         }
-        
+
         if error.contains("ValuesNotComparable") {
             return "Comparison errors (bytes/unsupported)".to_string();
         }
-        
+
         if error.contains("UnsupportedMapIndex") {
             return "Map index errors".to_string();
         }
-        
+
         if error.contains("UnexpectedType") {
             return "Type mismatch errors".to_string();
         }
-        
+
         if error.contains("DivisionByZero") {
             return "Division by zero errors".to_string();
         }
-        
+
         if error.contains("NoSuchOverload") {
             return "Overload resolution errors".to_string();
         }
@@ -497,55 +502,59 @@ fn categorize_test(name: &str, error: &str) -> String {
     if name.contains("optional") || name.contains("opt") {
         return "Optional/Chaining operations".to_string();
     }
-    
+
     if name.contains("struct") {
         return "Struct operations".to_string();
     }
-    
+
     if name.contains("string") || name.contains("String") {
         return "String operations".to_string();
     }
-    
+
     if name.contains("format") {
         return "String formatting".to_string();
     }
-    
+
     if name.contains("timestamp") || name.contains("Timestamp") {
         return "Timestamp operations".to_string();
     }
-    
+
     if name.contains("duration") || name.contains("Duration") {
         return "Duration operations".to_string();
     }
-    
+
     if name.contains("eq_") || name.contains("ne_") {
         return "Equality/inequality operations".to_string();
     }
-    
-    if name.contains("lt_") || name.contains("gt_") || name.contains("lte_") || name.contains("gte_") {
+
+    if name.contains("lt_")
+        || name.contains("gt_")
+        || name.contains("lte_")
+        || name.contains("gte_")
+    {
         return "Comparison operations (lt/gt/lte/gte)".to_string();
     }
-    
+
     if name.contains("bytes") || name.contains("Bytes") {
         return "Bytes operations".to_string();
     }
-    
+
     if name.contains("list") || name.contains("List") {
         return "List operations".to_string();
     }
-    
+
     if name.contains("map") || name.contains("Map") {
         return "Map operations".to_string();
     }
-    
+
     if name.contains("unicode") {
         return "Unicode operations".to_string();
     }
-    
+
     if name.contains("conversion") || name.contains("Conversion") {
         return "Type conversions".to_string();
     }
-    
+
     if name.contains("math") || name.contains("Math") {
         return "Math operations".to_string();
     }
@@ -582,40 +591,35 @@ fn test_name_matches_category(test_name: &str, category: &str) -> bool {
         "math functions (greatest/least)" | "greatest" | "least" | "math functions" => {
             name_lower.contains("greatest") || name_lower.contains("least")
         }
-        "optional/chaining (parse errors)" | "optional/chaining operations" | "optional" | "chaining" => {
-            name_lower.contains("optional") || name_lower.contains("opt") || name_lower.contains("chaining")
+        "optional/chaining (parse errors)"
+        | "optional/chaining operations"
+        | "optional"
+        | "chaining" => {
+            name_lower.contains("optional")
+                || name_lower.contains("opt")
+                || name_lower.contains("chaining")
         }
-        "struct operations" | "struct" => {
-            name_lower.contains("struct")
-        }
+        "struct operations" | "struct" => name_lower.contains("struct"),
         "string operations" | "string" => {
             name_lower.contains("string") && !name_lower.contains("format")
         }
         "timestamp operations" | "timestamp" => {
             name_lower.contains("timestamp") || name_lower.contains("time")
         }
-        "duration operations" | "duration" => {
-            name_lower.contains("duration")
-        }
+        "duration operations" | "duration" => name_lower.contains("duration"),
         "equality/inequality operations" | "equality" | "inequality" => {
             name_lower.starts_with("eq_") || name_lower.starts_with("ne_")
         }
         "comparison operations (lt/gt/lte/gte)" | "comparison" => {
-            name_lower.starts_with("lt_") || name_lower.starts_with("gt_") 
-                || name_lower.starts_with("lte_") || name_lower.starts_with("gte_")
+            name_lower.starts_with("lt_")
+                || name_lower.starts_with("gt_")
+                || name_lower.starts_with("lte_")
+                || name_lower.starts_with("gte_")
         }
-        "bytes operations" | "bytes" => {
-            name_lower.contains("bytes") || name_lower.contains("byte")
-        }
-        "list operations" | "list" => {
-            name_lower.contains("list") || name_lower.contains("elem")
-        }
-        "map operations" | "map" => {
-            name_lower.contains("map") && !name_lower.contains("optmap")
-        }
-        "unicode operations" | "unicode" => {
-            name_lower.contains("unicode")
-        }
+        "bytes operations" | "bytes" => name_lower.contains("bytes") || name_lower.contains("byte"),
+        "list operations" | "list" => name_lower.contains("list") || name_lower.contains("elem"),
+        "map operations" | "map" => name_lower.contains("map") && !name_lower.contains("optmap"),
+        "unicode operations" | "unicode" => name_lower.contains("unicode"),
         "type conversions" | "conversion" => {
             name_lower.contains("conversion") || name_lower.starts_with("to_")
         }
@@ -626,7 +630,9 @@ fn test_name_matches_category(test_name: &str, category: &str) -> bool {
         }
         _ => {
             // Try partial matching
-            category_lower.split_whitespace().any(|word| name_lower.contains(word))
+            category_lower
+                .split_whitespace()
+                .any(|word| name_lower.contains(word))
         }
     }
 }
