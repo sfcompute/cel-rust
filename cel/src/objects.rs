@@ -650,8 +650,11 @@ impl PartialOrd for Value {
             (Value::UInt(a), Value::UInt(b)) => Some(a.cmp(b)),
             (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
             (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
+            (Value::Bytes(a), Value::Bytes(b)) => Some(a.cmp(b)),
             (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-            (Value::Null, Value::Null) => Some(Ordering::Equal),
+            // Null comparisons should return None (not comparable) for <, >, <=, >=
+            // (but == and != are allowed)
+            (Value::Null, _) | (_, Value::Null) => None,
             #[cfg(feature = "chrono")]
             (Value::Duration(a), Value::Duration(b)) => Some(a.cmp(b)),
             #[cfg(feature = "chrono")]
