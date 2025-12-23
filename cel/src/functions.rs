@@ -155,7 +155,19 @@ pub fn string(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         #[cfg(feature = "chrono")]
         Value::Timestamp(t) => Value::String(t.to_rfc3339().into()),
         #[cfg(feature = "chrono")]
-        Value::Duration(v) => Value::String(crate::duration::format_duration(&v).into()),
+        Value::Duration(v) => {
+            // Format as decimal seconds (e.g., "1000000s")
+            let total_secs = v.num_seconds();
+            let nanos = v.num_nanoseconds().unwrap_or(0) % 1_000_000_000;
+            if nanos == 0 {
+                Value::String(Arc::new(format!("{}s", total_secs)))
+            } else {
+                // Include fractional seconds
+                let frac = (nanos as f64) / 1_000_000_000.0;
+                let total = total_secs as f64 + frac;
+                Value::String(Arc::new(format!("{}s", total)))
+            }
+        },
         Value::Int(v) => Value::String(v.to_string().into()),
         Value::UInt(v) => Value::String(v.to_string().into()),
         Value::Float(v) => Value::String(v.to_string().into()),
@@ -356,7 +368,7 @@ pub use time::timestamp;
 
 #[cfg(feature = "chrono")]
 pub mod time {
-    use super::Result;
+    use super::{FunctionContext, Result};
     use crate::magic::This;
     use crate::{ExecutionError, Value};
     use chrono::{Datelike, Days, Months, Timelike};
@@ -364,7 +376,11 @@ pub mod time {
 
     /// Duration parses the provided argument into a [`Value::Duration`] value.
     ///
-    /// The argument must be string, and must be in the format of a duration. See
+    /// Supports two overloads:
+    /// - `duration(string)` - parses a duration string
+    /// - `duration(duration)` - identity function, returns the duration unchanged
+    ///
+    /// The string argument must be in the format of a duration. See
     /// the [`parse_duration`] documentation for more information on the supported
     /// formats.
     ///
@@ -377,8 +393,35 @@ pub mod time {
     /// - `1.5ms` parses as 1 millisecond and 500 microseconds
     /// - `1ns` parses as 1 nanosecond
     /// - `1.5ns` parses as 1 nanosecond (sub-nanosecond durations not supported)
+    /// Duration function that handles both string and duration arguments
+    /// Overloads:
+    /// - duration(string) -> duration
+    /// - duration(duration) -> duration (identity)
     pub fn duration(value: Arc<String>) -> crate::functions::Result<Value> {
         Ok(Value::Duration(_duration(value.as_str())?))
+    }
+    
+    /// Duration function that accepts a Value (for overload support)
+    /// This handles the case where duration is called with a duration argument
+    pub fn duration_value(ftx: &FunctionContext, value: Value) -> crate::functions::Result<Value> {
+        match value {
+            Value::Duration(d) => Ok(Value::Duration(d)),
+            Value::String(s) => Ok(Value::Duration(_duration(s.as_str())?)),
+            _ => Err(ftx.error("duration() requires a string or duration argument")),
+        }
+    }
+    
+    /// Duration conversion - handles both string and duration arguments
+    /// This provides the overload: duration(duration) -> duration (identity)
+    pub fn duration_from_value(ftx: &FunctionContext, This(this): This<Value>) -> crate::functions::Result<Value> {
+        match this {
+            Value::Duration(d) => Ok(Value::Duration(d)),
+            Value::String(s) => {
+                // Try to parse as string (fallback for method call style)
+                Ok(Value::Duration(_duration(s.as_str())?))
+            }
+            _ => Err(ftx.error("duration() requires a string or duration argument")),
+        }
     }
 
     /// Timestamp parses the provided argument into a [`Value::Timestamp`] value.

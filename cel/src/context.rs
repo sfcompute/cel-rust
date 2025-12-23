@@ -227,6 +227,9 @@ impl Default for Context<'_> {
         #[cfg(feature = "chrono")]
         {
             ctx.add_function("duration", functions::duration);
+            // Overload: duration(duration) -> duration (identity)
+            // Register as a separate function that accepts Value
+            ctx.add_function("duration", functions::time::duration_value);
             ctx.add_function("timestamp", functions::timestamp);
             ctx.add_function("getFullYear", functions::time::timestamp_year);
             ctx.add_function("getMonth", functions::time::timestamp_month);
