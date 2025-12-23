@@ -909,6 +909,7 @@ impl Value {
                             let idx = Value::resolve(&call.args[1], ctx)?;
                             let mut is_optional = call.func_name == operators::OPT_INDEX;
 
+                            // Unwrap OptionalValue if present
                             if let Ok(opt_val) = <&OptionalValue>::try_from(&value) {
                                 is_optional = true;
                                 value = match opt_val.value() {
@@ -918,6 +919,7 @@ impl Value {
                                     }
                                 };
                             }
+                            
 
                             let result = match (value, idx) {
                                 (Value::List(items), Value::Int(idx)) => {
@@ -965,6 +967,24 @@ impl Value {
                                     map.get(&key).cloned().ok_or_else(|| {
                                         ExecutionError::NoSuchKey(property.to_string().into())
                                     })
+                                }
+                                (Value::Map(map), Value::Float(property)) => {
+                                    // Try to convert float to int/uint for key lookup
+                                    // First try as int, then as uint
+                                    if property.fract() == 0.0 {
+                                        let as_int = property as i64;
+                                        let as_uint = property as u64;
+                                        // Try int key first
+                                        if let Some(val) = map.get(&Key::Int(as_int)) {
+                                            Ok(val.clone())
+                                        } else if let Some(val) = map.get(&Key::Uint(as_uint)) {
+                                            Ok(val.clone())
+                                        } else {
+                                            Err(ExecutionError::NoSuchKey(property.to_string().into()))
+                                        }
+                                    } else {
+                                        Err(ExecutionError::NoSuchKey(property.to_string().into()))
+                                    }
                                 }
                                 (Value::Struct(_), index) => {
                                     Err(ExecutionError::UnsupportedMapIndex(index))
@@ -1120,7 +1140,16 @@ impl Value {
             Expr::Select(select) => {
                 let left = Value::resolve(select.operand.deref(), ctx)?;
                 if select.test {
-                    match &left {
+                    // Handle OptionalValue for has() checks
+                    let value_to_check = if let Ok(opt_val) = <&OptionalValue>::try_from(&left) {
+                        match opt_val.value() {
+                            Some(inner) => inner,
+                            None => return Ok(Value::Bool(false)),
+                        }
+                    } else {
+                        &left
+                    };
+                    match value_to_check {
                         Value::Map(map) => {
                             for key in map.map.deref().keys() {
                                 if key.to_string().eq(&select.field) {
@@ -1271,6 +1300,21 @@ impl Value {
     //        FunctionCall([Ident("c")]))
 
     fn member(self, name: &str) -> ResolveResult {
+        // Handle OptionalValue - unwrap it first, then access the member
+        // If the member access fails, return optional.none() instead of an error
+        // This allows chaining like optional.of(map).c.missing.or(...)
+        if let Ok(opt_val) = <&OptionalValue>::try_from(&self) {
+            return match opt_val.value() {
+                Some(inner) => {
+                    match inner.clone().member(name) {
+                        Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
+                        Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+                    }
+                },
+                None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+            };
+        }
+        
         // todo! Ideally we would avoid creating a String just to create a Key for lookup in the
         // map, but this would require something like the `hashbrown` crate's `Equivalent` trait.
         let name: Arc<String> = name.to_owned().into();
