@@ -927,12 +927,24 @@ impl gen::CELVisitorCompat<'_> for Parser {
     fn visit_Int(&mut self, ctx: &IntContext<'_>) -> Self::Return {
         let string = ctx.get_text();
         if let Some(token) = ctx.tok.as_ref() {
-            let val = match if let Some(string) = string.strip_prefix("0x") {
-                i64::from_str_radix(string, 16)
+            // Handle negative sign for hex literals (e.g., -0x55555555)
+            let (is_negative, string_without_sign) = if let Some(rest) = string.strip_prefix('-') {
+                (true, rest)
             } else {
-                string.parse::<i64>()
+                (false, string.as_str())
+            };
+
+            let val = match if let Some(hex_string) = string_without_sign.strip_prefix("0x") {
+                i64::from_str_radix(hex_string, 16)
+            } else {
+                // Re-add negative sign for decimal parsing
+                if is_negative {
+                    format!("-{}", string_without_sign).parse::<i64>()
+                } else {
+                    string_without_sign.parse::<i64>()
+                }
             } {
-                Ok(v) => v,
+                Ok(v) => if is_negative && string_without_sign.starts_with("0x") { -v } else { v },
                 Err(e) => return self.report_error(token, Some(e), "invalid int literal"),
             };
             self.helper

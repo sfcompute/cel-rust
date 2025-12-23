@@ -599,18 +599,29 @@ pub fn last_index_of(ftx: &FunctionContext, This(this): This<Arc<String>>, Argum
     
     let chars: Vec<char> = this.chars().collect();
     let start_idx = (start_position as usize).min(chars.len());
-    
-    // Convert character start index to byte index (inclusive)
-    let byte_end = if start_idx >= chars.len() {
+
+    // To find matches that start at or before start_idx, we need to search
+    // up to start_idx + substring_length
+    let substr_len = substr.chars().count();
+    let search_end_idx = (start_idx + substr_len).min(chars.len());
+
+    // Convert character search end index to byte index
+    let byte_end = if search_end_idx >= chars.len() {
         this.len()
     } else {
-        chars[..start_idx + 1].iter().map(|c| c.len_utf8()).sum::<usize>()
+        chars[..search_end_idx].iter().map(|c| c.len_utf8()).sum::<usize>()
     };
-    
+
     let index = match this[..byte_end].rfind(substr.as_str()) {
         Some(byte_index) => {
             // Convert byte index to character index
-            this[..byte_index].chars().count() as i64
+            let char_index = this[..byte_index].chars().count() as i64;
+            // Make sure the match starts at or before start_position
+            if char_index <= start_position {
+                char_index
+            } else {
+                -1
+            }
         },
         None => -1,
     };
@@ -721,32 +732,57 @@ pub fn split(ftx: &FunctionContext, This(this): This<Arc<String>>, Arguments(arg
     }
 }
 
-/// Returns a substring of the string from start index to end index.
-pub fn substring(ftx: &FunctionContext, This(this): This<Arc<String>>, start: i64, end: i64) -> Result<Value> {
+/// Returns a substring of the string from start index to end index (2 args)
+/// or from start index to end of string (1 arg).
+pub fn substring(ftx: &FunctionContext, This(this): This<Arc<String>>, Arguments(args): Arguments) -> Result<Value> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(ftx.error("substring requires 1 or 2 arguments"));
+    }
+
+    let start = match &args[0] {
+        Value::Int(i) => *i,
+        _ => return Err(ftx.error("substring start argument must be an integer")),
+    };
+
     if start < 0 {
         return Err(ftx.error(format!("substring start index {} is negative", start)));
     }
+
+    let chars: Vec<char> = this.chars().collect();
+    let start_idx = start as usize;
+
+    // Check start index is in range
+    if start_idx > chars.len() {
+        return Err(ftx.error(format!("index out of range: {}", start)));
+    }
+
+    if args.len() == 1 {
+        // Single argument: substring from start to end of string
+        let substring: String = chars[start_idx..].iter().collect();
+        return Ok(Value::String(Arc::new(substring)));
+    }
+
+    // Two arguments: substring from start to end
+    let end = match &args[1] {
+        Value::Int(i) => *i,
+        _ => return Err(ftx.error("substring end argument must be an integer")),
+    };
+
     if end < 0 {
         return Err(ftx.error(format!("substring end index {} is negative", end)));
     }
     if start > end {
-        return Err(ftx.error(format!("substring start index {} is greater than end index {}", start, end)));
+        return Err(ftx.error(format!("invalid substring range. start: {}, end: {}", start, end)));
     }
-    
-    let chars: Vec<char> = this.chars().collect();
-    let start_idx = start as usize;
+
     let end_idx = end as usize;
-    
-    // Check for out of range indices
-    if start_idx > chars.len() {
-        return Err(ftx.error(format!("index out of range: {}", start)));
-    }
+
+    // Check end index is in range
     if end_idx > chars.len() {
         return Err(ftx.error(format!("index out of range: {}", end)));
     }
-    
+
     let substring: String = chars[start_idx..end_idx].iter().collect();
-    
     Ok(Value::String(Arc::new(substring)))
 }
 
@@ -1119,10 +1155,34 @@ pub mod time {
     /// Timestamp parses the provided argument into a [`Value::Timestamp`] value.
     /// The
     pub fn timestamp(value: Arc<String>) -> Result<Value> {
-        Ok(Value::Timestamp(
-            chrono::DateTime::parse_from_rfc3339(value.as_str())
-                .map_err(|e| ExecutionError::function_error("timestamp", e.to_string().as_str()))?,
-        ))
+        // Pre-validate year to catch values chrono can't parse (like year 10000)
+        // RFC3339 format starts with year: YYYY-MM-DD... or YYYYY-MM-DD...
+        if let Some(dash_pos) = value.find('-') {
+            if let Some(year_str) = value.get(0..dash_pos) {
+                if let Ok(year) = year_str.parse::<i32>() {
+                    if year < 1 || year > 9999 {
+                        return Err(ExecutionError::function_error(
+                            "timestamp",
+                            &format!("timestamp out of range: year {} must be between 0001 and 9999", year),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let ts = chrono::DateTime::parse_from_rfc3339(value.as_str())
+            .map_err(|e| ExecutionError::function_error("timestamp", e.to_string().as_str()))?;
+
+        // Validate year range again after parsing (CEL spec: 0001-01-01 to 9999-12-31)
+        let year = ts.year();
+        if year < 1 || year > 9999 {
+            return Err(ExecutionError::function_error(
+                "timestamp",
+                &format!("timestamp out of range: year {} must be between 0001 and 9999", year),
+            ));
+        }
+
+        Ok(Value::Timestamp(ts))
     }
     
     /// Timestamp conversion - handles string, int, and timestamp arguments
@@ -1138,15 +1198,49 @@ pub mod time {
                     .timestamp_opt(secs, 0)
                     .single()
                     .ok_or_else(|| ftx.error("invalid timestamp"))?;
+
+                // Validate year range (CEL spec: 0001-01-01 to 9999-12-31)
+                let year = ts.year();
+                if year < 1 || year > 9999 {
+                    return Err(ftx.error(format!(
+                        "timestamp out of range: year {} must be between 0001 and 9999",
+                        year
+                    )));
+                }
+
                 Ok(Value::Timestamp(ts))
             }
             #[cfg(feature = "chrono")]
             Value::Timestamp(t) => Ok(Value::Timestamp(t)),
             Value::String(s) => {
-                Ok(Value::Timestamp(
-                    chrono::DateTime::parse_from_rfc3339(s.as_str())
-                        .map_err(|e| ftx.error(format!("timestamp parse error: {e}")))?,
-                ))
+                // Pre-validate year to catch values chrono can't parse (like year 10000)
+                // RFC3339 format starts with year: YYYY-MM-DD... or YYYYY-MM-DD...
+                if let Some(dash_pos) = s.find('-') {
+                    if let Some(year_str) = s.get(0..dash_pos) {
+                        if let Ok(year) = year_str.parse::<i32>() {
+                            if year < 1 || year > 9999 {
+                                return Err(ftx.error(format!(
+                                    "timestamp out of range: year {} must be between 0001 and 9999",
+                                    year
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                let ts = chrono::DateTime::parse_from_rfc3339(s.as_str())
+                    .map_err(|e| ftx.error(format!("timestamp parse error: {e}")))?;
+
+                // Validate year range again after parsing (CEL spec: 0001-01-01 to 9999-12-31)
+                let year = ts.year();
+                if year < 1 || year > 9999 {
+                    return Err(ftx.error(format!(
+                        "timestamp out of range: year {} must be between 0001 and 9999",
+                        year
+                    )));
+                }
+
+                Ok(Value::Timestamp(ts))
             }
             _ => Err(ftx.error("timestamp() requires a string, int, or timestamp argument")),
         }
@@ -1155,8 +1249,42 @@ pub mod time {
     /// A wrapper around [`parse_duration`] that converts errors into [`ExecutionError`].
     /// and only returns the duration, rather than returning the remaining input.
     fn _duration(i: &str) -> Result<chrono::Duration> {
+        // CEL duration range: -315576000000s to +315576000000s (approx +/- 10,000 years)
+        const MAX_DURATION_SECS: i64 = 315_576_000_000;
+
+        // Pre-validate to catch values that would overflow during parsing
+        // Extract the numeric part and check if it's too large
+        let trimmed = i.trim_start_matches('-');
+        if let Some(s_pos) = trimmed.find('s') {
+            if let Ok(secs) = trimmed[..s_pos].parse::<i64>() {
+                if secs.abs() > MAX_DURATION_SECS {
+                    return Err(ExecutionError::function_error(
+                        "duration",
+                        &format!(
+                            "duration out of range: {} seconds exceeds maximum of +/- {} seconds",
+                            if i.starts_with('-') { -secs } else { secs },
+                            MAX_DURATION_SECS
+                        ),
+                    ));
+                }
+            }
+        }
+
         let (_, duration) = crate::duration::parse_duration(i)
             .map_err(|e| ExecutionError::function_error("duration", e.to_string()))?;
+
+        // Validate again after parsing (for complex durations like "1h2m3s")
+        let total_secs = duration.num_seconds();
+        if total_secs.abs() > MAX_DURATION_SECS {
+            return Err(ExecutionError::function_error(
+                "duration",
+                &format!(
+                    "duration out of range: {} seconds exceeds maximum of +/- {} seconds",
+                    total_secs, MAX_DURATION_SECS
+                ),
+            ));
+        }
+
         Ok(duration)
     }
 
