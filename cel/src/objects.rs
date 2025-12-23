@@ -571,6 +571,10 @@ impl Value {
         match self {
             Value::List(v) => v.is_empty(),
             Value::Map(v) => v.map.is_empty(),
+            Value::Struct(s) => {
+                // A struct is zero if it has no fields or all fields are zero
+                s.fields.is_empty() || s.fields.values().all(|v| v.is_zero())
+            }
             Value::Int(0) => true,
             Value::UInt(0) => true,
             Value::Float(f) => *f == 0.0,
@@ -930,6 +934,11 @@ impl Value {
                                 (Value::String(_), Value::Int(idx)) => {
                                     Err(ExecutionError::NoSuchKey(idx.to_string().into()))
                                 }
+                                (Value::Struct(s), Value::String(property)) => {
+                                    s.fields.get(property.as_str())
+                                        .cloned()
+                                        .ok_or_else(|| ExecutionError::NoSuchKey(property.clone()))
+                                }
                                 (Value::Map(map), Value::String(property)) => {
                                     let key: Key = (&**property).into();
                                     map.get(&key)
@@ -953,6 +962,9 @@ impl Value {
                                     map.get(&key).cloned().ok_or_else(|| {
                                         ExecutionError::NoSuchKey(property.to_string().into())
                                     })
+                                }
+                                (Value::Struct(_), index) => {
+                                    Err(ExecutionError::UnsupportedMapIndex(index))
                                 }
                                 (Value::Map(_), index) => {
                                     Err(ExecutionError::UnsupportedMapIndex(index))
@@ -988,15 +1000,39 @@ impl Value {
                             };
                             if let Ok(opt_val) = <&OptionalValue>::try_from(&operand) {
                                 return match opt_val.value() {
-                                    Some(inner) => Ok(Value::Opaque(Arc::new(OptionalValue::of(
-                                        inner.clone().member(&field)?,
-                                    )))),
+                                    Some(inner) => {
+                                        // Check if field exists first, don't use default values for optional access
+                                        let field_exists = match inner {
+                                            Value::Struct(ref s) => s.fields.contains_key(field.as_str()),
+                                            Value::Map(ref m) => m.map.contains_key(&field.clone().into()),
+                                            _ => false,
+                                        };
+                                        if field_exists {
+                                            match inner.clone().member(&field) {
+                                                Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
+                                                Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+                                            }
+                                        } else {
+                                            Ok(Value::Opaque(Arc::new(OptionalValue::none())))
+                                        }
+                                    },
                                     None => Ok(operand),
                                 };
                             }
-                            return Ok(Value::Opaque(Arc::new(OptionalValue::of(
-                                operand.member(&field)?,
-                            ))));
+                            // Check if field exists first, don't use default values for optional access
+                            let field_exists = match &operand {
+                                Value::Struct(s) => s.fields.contains_key(field.as_str()),
+                                Value::Map(m) => m.map.contains_key(&field.clone().into()),
+                                _ => false,
+                            };
+                            return if field_exists {
+                                match operand.member(&field) {
+                                    Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
+                                    Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+                                }
+                            } else {
+                                Ok(Value::Opaque(Arc::new(OptionalValue::none())))
+                            };
                         }
                         _ => (),
                     }
@@ -1189,7 +1225,21 @@ impl Value {
                     match &entry.expr {
                         EntryExpr::StructField(field_expr) => {
                             let value = Value::resolve(&field_expr.value, ctx)?;
-                            fields.insert(field_expr.field.clone(), value);
+                            if field_expr.optional {
+                                // For optional fields, if the value is an OptionalValue, unwrap it
+                                // If it's None, don't set the field
+                                if let Ok(opt_val) = <&OptionalValue>::try_from(&value) {
+                                    if let Some(inner) = opt_val.value() {
+                                        fields.insert(field_expr.field.clone(), inner.clone());
+                                    }
+                                    // If None, don't insert the field
+                                } else {
+                                    // If not an OptionalValue, set it directly
+                                    fields.insert(field_expr.field.clone(), value);
+                                }
+                            } else {
+                                fields.insert(field_expr.field.clone(), value);
+                            }
                         }
                         EntryExpr::MapEntry(_) => {
                             return Err(ExecutionError::function_error(
@@ -1226,7 +1276,41 @@ impl Value {
         // a property on self, or a method on self.
         let child = match self {
             Value::Map(ref m) => m.map.get(&name.clone().into()).cloned(),
-            Value::Struct(ref s) => s.fields.get(name.as_str()).cloned(),
+            Value::Struct(ref s) => {
+                if let Some(value) = s.fields.get(name.as_str()) {
+                    Some(value.clone())
+                } else {
+                    // For proto2, unset optional fields have default values
+                    // Try to infer the default from the field name
+                    // This is a heuristic - ideally we'd have type information
+                    if name.contains("map") || name.contains("Map") {
+                        // Map fields default to empty map
+                        Some(Value::Map(Map {
+                            map: Arc::new(HashMap::new()),
+                        }))
+                    } else if name.contains("list") || name.contains("List") || name.contains("repeated") {
+                        // List/repeated fields default to empty list
+                        Some(Value::List(Arc::new(Vec::new())))
+                    } else if name.contains("string") || name.contains("String") {
+                        // String fields default to empty string
+                        Some(Value::String(Arc::new(String::new())))
+                    } else if name.contains("bytes") || name.contains("Bytes") {
+                        // Bytes fields default to empty bytes
+                        Some(Value::Bytes(Arc::new(Vec::new())))
+                    } else if name.contains("bool") || name.contains("Bool") {
+                        // Bool fields default to false
+                        Some(Value::Bool(false))
+                    } else if name.contains("int") || name.contains("Int") || name.contains("uint") || name.contains("UInt") {
+                        // Numeric fields default to 0
+                        Some(Value::Int(0))
+                    } else if name.contains("double") || name.contains("Double") || name.contains("float") || name.contains("Float") {
+                        // Float fields default to 0.0
+                        Some(Value::Float(0.0))
+                    } else {
+                        None
+                    }
+                }
+            }
             _ => None,
         };
 

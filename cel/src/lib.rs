@@ -162,7 +162,8 @@ pub struct Program {
 
 impl Program {
     pub fn compile(source: &str) -> Result<Program, ParseErrors> {
-        let parser = Parser::default();
+        let parser = Parser::default()
+            .enable_optional_syntax(true);
         parser
             .parse(source)
             .map(|expression| Program { expression })
