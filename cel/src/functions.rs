@@ -153,7 +153,20 @@ pub fn string(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     Ok(match this {
         Value::String(v) => Value::String(v.clone()),
         #[cfg(feature = "chrono")]
-        Value::Timestamp(t) => Value::String(t.to_rfc3339().into()),
+        Value::Timestamp(t) => {
+            // Format as RFC3339 with 'Z' suffix for UTC (not '+00:00')
+            let utc = t.to_utc();
+            // Check if there are nanoseconds
+            let nanos = utc.timestamp_subsec_nanos();
+            let formatted = if nanos == 0 {
+                utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            } else {
+                utc.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+            };
+            // Replace '+00:00' with 'Z' for UTC timestamps
+            let formatted = formatted.replace("+00:00", "Z");
+            Value::String(Arc::new(formatted))
+        },
         #[cfg(feature = "chrono")]
         Value::Duration(v) => {
             // Format as decimal seconds (e.g., "1000000s")
@@ -231,6 +244,8 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         }
         Value::Int(v) => Value::Int(v),
         Value::UInt(v) => Value::Int(v.try_into().map_err(|_| ftx.error("integer overflow"))?),
+        #[cfg(feature = "chrono")]
+        Value::Timestamp(t) => Value::Int(t.timestamp()),
         v => return Err(ftx.error(format!("cannot convert {v:?} to int"))),
     })
 }
@@ -431,6 +446,33 @@ pub mod time {
             chrono::DateTime::parse_from_rfc3339(value.as_str())
                 .map_err(|e| ExecutionError::function_error("timestamp", e.to_string().as_str()))?,
         ))
+    }
+    
+    /// Timestamp conversion - handles string, int, and timestamp arguments
+    /// Overloads:
+    /// - timestamp(int) -> timestamp (converts Unix timestamp in seconds)
+    /// - timestamp(timestamp) -> timestamp (identity)
+    pub fn timestamp_from_int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+        match this {
+            Value::Int(secs) => {
+                use chrono::{DateTime, FixedOffset, TimeZone};
+                let ts = FixedOffset::east_opt(0)
+                    .unwrap()
+                    .timestamp_opt(secs, 0)
+                    .single()
+                    .ok_or_else(|| ftx.error("invalid timestamp"))?;
+                Ok(Value::Timestamp(ts))
+            }
+            #[cfg(feature = "chrono")]
+            Value::Timestamp(t) => Ok(Value::Timestamp(t)),
+            Value::String(s) => {
+                Ok(Value::Timestamp(
+                    chrono::DateTime::parse_from_rfc3339(s.as_str())
+                        .map_err(|e| ftx.error(format!("timestamp parse error: {e}")))?,
+                ))
+            }
+            _ => Err(ftx.error("timestamp() requires a string, int, or timestamp argument")),
+        }
     }
 
     /// A wrapper around [`parse_duration`] that converts errors into [`ExecutionError`].
@@ -1047,8 +1089,17 @@ fn format_value_as_string(value: &Value) -> String {
         }
         #[cfg(feature = "chrono")]
         Value::Timestamp(t) => {
-            // Format as RFC3339 in UTC
-            t.to_utc().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            // Format as RFC3339 with 'Z' suffix for UTC (not '+00:00')
+            let utc = t.to_utc();
+            // Use to_rfc3339_opts with appropriate precision
+            let nanos = utc.timestamp_subsec_nanos();
+            let formatted = if nanos == 0 {
+                utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            } else {
+                utc.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+            };
+            // Replace '+00:00' with 'Z' for UTC timestamps
+            formatted.replace("+00:00", "Z")
         }
         #[cfg(feature = "chrono")]
         Value::Duration(d) => {

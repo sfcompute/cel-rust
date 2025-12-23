@@ -92,7 +92,7 @@ impl PartialEq for Map {
         if self.map.len() != other.map.len() {
             return false;
         }
-        
+
         // Check that for every key in self, there's a matching key in other with equal value
         for (key, value) in self.map.iter() {
             // Try direct lookup first
@@ -119,7 +119,7 @@ impl PartialEq for Map {
                     }
                     _ => None,
                 };
-                
+
                 if let Some(converted) = converted_key {
                     if let Some(other_value) = other.map.get(&converted) {
                         if value != other_value {
@@ -133,7 +133,7 @@ impl PartialEq for Map {
                 }
             }
         }
-        
+
         true
     }
 }
@@ -616,10 +616,24 @@ impl PartialEq for Value {
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
+            // Empty google.protobuf.Value struct is equal to null
+            (Value::Struct(ref s), Value::Null)
+                if s.type_name.as_str() == "google.protobuf.Value" && s.fields.is_empty() =>
+            {
+                true
+            }
+            (Value::Null, Value::Struct(ref s))
+                if s.type_name.as_str() == "google.protobuf.Value" && s.fields.is_empty() =>
+            {
+                true
+            }
             #[cfg(feature = "chrono")]
             (Value::Duration(a), Value::Duration(b)) => a == b,
             #[cfg(feature = "chrono")]
             (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+            // Timestamp should not equal null
+            #[cfg(feature = "chrono")]
+            (Value::Timestamp(_), Value::Null) | (Value::Null, Value::Timestamp(_)) => false,
             // Allow different numeric types to be compared without explicit casting.
             (Value::Int(a), Value::UInt(b)) => a
                 .to_owned()
@@ -887,22 +901,80 @@ impl Value {
                             }
                         }
                         operators::LOGICAL_OR => {
-                            let left = Value::resolve(&call.args[0], ctx)?;
-                            return if left.to_bool()? {
-                                left.into()
-                            } else {
-                                Value::resolve(&call.args[1], ctx)
-                            };
+                            // CEL semantics: if left side is truthy, return it (short-circuit)
+                            // If left side errors, still evaluate right side (errors are ignored if result is determined)
+                            match Value::resolve(&call.args[0], ctx) {
+                                Ok(left) => {
+                                    if left.to_bool().unwrap_or(false) {
+                                        return Ok(left.into());
+                                    }
+                                    // Left is false, evaluate right
+                                    return Value::resolve(&call.args[1], ctx);
+                                }
+                                Err(_) => {
+                                    // Left side errored, but we still evaluate right side
+                                    // If right side is truthy, return it (errors are ignored)
+                                    match Value::resolve(&call.args[1], ctx) {
+                                        Ok(right) => {
+                                            if right.to_bool().unwrap_or(false) {
+                                                return Ok(right.into());
+                                            }
+                                            // Right is also false, return false
+                                            return Ok(Value::Bool(false).into());
+                                        }
+                                        Err(_) => {
+                                            // Both sides errored, but OR can still return false
+                                            // In CEL, if both error, we return false
+                                            return Ok(Value::Bool(false).into());
+                                        }
+                                    }
+                                }
+                            }
                         }
                         operators::LOGICAL_AND => {
-                            let left = Value::resolve(&call.args[0], ctx)?;
-                            return if !left.to_bool()? {
-                                Value::Bool(false)
-                            } else {
-                                let right = Value::resolve(&call.args[1], ctx)?;
-                                Value::Bool(right.to_bool()?)
+                            // CEL semantics: if left side is falsy, return false (short-circuit)
+                            // If left side errors, still evaluate right side (errors are ignored if result is determined)
+                            let left_result = Value::resolve(&call.args[0], ctx);
+                            match left_result {
+                                Ok(left) => {
+                                    if !left.to_bool().unwrap_or(false) {
+                                        return Ok(Value::Bool(false).into());
+                                    }
+                                    // Left is true, evaluate right
+                                    let right_result = Value::resolve(&call.args[1], ctx);
+                                    match right_result {
+                                        Ok(right) => {
+                                            return Ok(Value::Bool(
+                                                right.to_bool().unwrap_or(false),
+                                            )
+                                            .into())
+                                        }
+                                        Err(_) => {
+                                            // Right errored, but left was true
+                                            // In CEL, if right errors, we return false
+                                            return Ok(Value::Bool(false).into());
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    // Left side errored, but we still evaluate right side
+                                    let right_result = Value::resolve(&call.args[1], ctx);
+                                    match right_result {
+                                        Ok(right) => {
+                                            if !right.to_bool().unwrap_or(false) {
+                                                // Right is false, so AND is false
+                                                return Ok(Value::Bool(false).into());
+                                            }
+                                            // Right is true, but left errored, so AND is false
+                                            return Ok(Value::Bool(false).into());
+                                        }
+                                        Err(_) => {
+                                            // Both sides errored, AND returns false
+                                            return Ok(Value::Bool(false).into());
+                                        }
+                                    }
+                                }
                             }
-                            .into();
                         }
                         operators::INDEX | operators::OPT_INDEX => {
                             let mut value = Value::resolve(&call.args[0], ctx)?;
@@ -919,7 +991,6 @@ impl Value {
                                     }
                                 };
                             }
-                            
 
                             let result = match (value, idx) {
                                 (Value::List(items), Value::Int(idx)) => {
@@ -939,11 +1010,11 @@ impl Value {
                                 (Value::String(_), Value::Int(idx)) => {
                                     Err(ExecutionError::NoSuchKey(idx.to_string().into()))
                                 }
-                                (Value::Struct(s), Value::String(property)) => {
-                                    s.fields.get(property.as_str())
-                                        .cloned()
-                                        .ok_or_else(|| ExecutionError::NoSuchKey(property.clone()))
-                                }
+                                (Value::Struct(s), Value::String(property)) => s
+                                    .fields
+                                    .get(property.as_str())
+                                    .cloned()
+                                    .ok_or_else(|| ExecutionError::NoSuchKey(property.clone())),
                                 (Value::Map(map), Value::String(property)) => {
                                     let key: Key = (&**property).into();
                                     map.get(&key)
@@ -980,7 +1051,9 @@ impl Value {
                                         } else if let Some(val) = map.get(&Key::Uint(as_uint)) {
                                             Ok(val.clone())
                                         } else {
-                                            Err(ExecutionError::NoSuchKey(property.to_string().into()))
+                                            Err(ExecutionError::NoSuchKey(
+                                                property.to_string().into(),
+                                            ))
                                         }
                                     } else {
                                         Err(ExecutionError::NoSuchKey(property.to_string().into()))
@@ -1026,19 +1099,27 @@ impl Value {
                                     Some(inner) => {
                                         // Check if field exists first, don't use default values for optional access
                                         let field_exists = match inner {
-                                            Value::Struct(ref s) => s.fields.contains_key(field.as_str()),
-                                            Value::Map(ref m) => m.map.contains_key(&field.clone().into()),
+                                            Value::Struct(ref s) => {
+                                                s.fields.contains_key(field.as_str())
+                                            }
+                                            Value::Map(ref m) => {
+                                                m.map.contains_key(&field.clone().into())
+                                            }
                                             _ => false,
                                         };
                                         if field_exists {
                                             match inner.clone().member(&field) {
-                                                Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
-                                                Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+                                                Ok(val) => Ok(Value::Opaque(Arc::new(
+                                                    OptionalValue::of(val),
+                                                ))),
+                                                Err(_) => Ok(Value::Opaque(Arc::new(
+                                                    OptionalValue::none(),
+                                                ))),
                                             }
                                         } else {
                                             Ok(Value::Opaque(Arc::new(OptionalValue::none())))
                                         }
-                                    },
+                                    }
                                     None => Ok(operand),
                                 };
                             }
@@ -1158,9 +1239,7 @@ impl Value {
                             }
                             Ok(Value::Bool(false))
                         }
-                        Value::Struct(s) => {
-                            Ok(Value::Bool(s.fields.contains_key(&select.field)))
-                        }
+                        Value::Struct(s) => Ok(Value::Bool(s.fields.contains_key(&select.field))),
                         _ => Ok(Value::Bool(false)),
                     }
                 } else {
@@ -1305,16 +1384,14 @@ impl Value {
         // This allows chaining like optional.of(map).c.missing.or(...)
         if let Ok(opt_val) = <&OptionalValue>::try_from(&self) {
             return match opt_val.value() {
-                Some(inner) => {
-                    match inner.clone().member(name) {
-                        Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
-                        Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
-                    }
+                Some(inner) => match inner.clone().member(name) {
+                    Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
+                    Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
                 },
                 None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
             };
         }
-        
+
         // todo! Ideally we would avoid creating a String just to create a Key for lookup in the
         // map, but this would require something like the `hashbrown` crate's `Equivalent` trait.
         let name: Arc<String> = name.to_owned().into();
@@ -1335,7 +1412,10 @@ impl Value {
                         Some(Value::Map(Map {
                             map: Arc::new(HashMap::new()),
                         }))
-                    } else if name.contains("list") || name.contains("List") || name.contains("repeated") {
+                    } else if name.contains("list")
+                        || name.contains("List")
+                        || name.contains("repeated")
+                    {
                         // List/repeated fields default to empty list
                         Some(Value::List(Arc::new(Vec::new())))
                     } else if name.contains("string") || name.contains("String") {
@@ -1347,10 +1427,18 @@ impl Value {
                     } else if name.contains("bool") || name.contains("Bool") {
                         // Bool fields default to false
                         Some(Value::Bool(false))
-                    } else if name.contains("int") || name.contains("Int") || name.contains("uint") || name.contains("UInt") {
+                    } else if name.contains("int")
+                        || name.contains("Int")
+                        || name.contains("uint")
+                        || name.contains("UInt")
+                    {
                         // Numeric fields default to 0
                         Some(Value::Int(0))
-                    } else if name.contains("double") || name.contains("Double") || name.contains("float") || name.contains("Float") {
+                    } else if name.contains("double")
+                        || name.contains("Double")
+                        || name.contains("float")
+                        || name.contains("Float")
+                    {
                         // Float fields default to 0.0
                         Some(Value::Float(0.0))
                     } else {

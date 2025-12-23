@@ -231,6 +231,8 @@ impl Default for Context<'_> {
             // Register as a separate function that accepts Value
             ctx.add_function("duration", functions::time::duration_value);
             ctx.add_function("timestamp", functions::timestamp);
+            // Overload: timestamp(int) -> timestamp (converts Unix timestamp in seconds)
+            ctx.add_function("timestamp", functions::time::timestamp_from_int);
             ctx.add_function("getFullYear", functions::time::timestamp_year);
             ctx.add_function("getMonth", functions::time::timestamp_month);
             ctx.add_function("getDayOfYear", functions::time::timestamp_year_day);
