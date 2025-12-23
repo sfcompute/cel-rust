@@ -517,6 +517,206 @@ pub fn min(Arguments(args): Arguments) -> Result<Value> {
         .cloned()
 }
 
+/// Returns the greatest value from the arguments.
+/// Similar to max but named "greatest" for CEL compatibility.
+pub fn greatest(Arguments(args): Arguments) -> Result<Value> {
+    max(Arguments(args))
+}
+
+/// Returns the least value from the arguments.
+/// Similar to min but named "least" for CEL compatibility.
+pub fn least(Arguments(args): Arguments) -> Result<Value> {
+    min(Arguments(args))
+}
+
+/// Truncates a floating point number to an integer.
+pub fn trunc(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Float(f) => Ok(Value::Float(f.trunc())),
+        Value::Int(i) => Ok(Value::Int(i)),
+        Value::UInt(u) => Ok(Value::UInt(u)),
+        v => Err(ftx.error(format!("cannot truncate {v:?}"))),
+    }
+}
+
+/// Returns the floor of a floating point number.
+pub fn floor(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Float(f) => Ok(Value::Float(f.floor())),
+        Value::Int(i) => Ok(Value::Int(i)),
+        Value::UInt(u) => Ok(Value::UInt(u)),
+        v => Err(ftx.error(format!("cannot floor {v:?}"))),
+    }
+}
+
+/// Returns the ceiling of a floating point number.
+pub fn ceil(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Float(f) => Ok(Value::Float(f.ceil())),
+        Value::Int(i) => Ok(Value::Int(i)),
+        Value::UInt(u) => Ok(Value::UInt(u)),
+        v => Err(ftx.error(format!("cannot ceil {v:?}"))),
+    }
+}
+
+/// Returns true if the value is finite (not NaN or infinity).
+pub fn is_finite(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Float(f) => Ok(Value::Bool(f.is_finite())),
+        Value::Int(_) | Value::UInt(_) => Ok(Value::Bool(true)),
+        v => Err(ftx.error(format!("isFinite not supported for {v:?}"))),
+    }
+}
+
+/// Returns true if the value is infinite.
+pub fn is_inf(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Float(f) => Ok(Value::Bool(f.is_infinite())),
+        Value::Int(_) | Value::UInt(_) => Ok(Value::Bool(false)),
+        v => Err(ftx.error(format!("isInf not supported for {v:?}"))),
+    }
+}
+
+/// Bitwise OR operation.
+pub fn bit_or(ftx: &FunctionContext, left: Value, right: Value) -> Result<Value> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a | b)),
+        (Value::UInt(a), Value::UInt(b)) => Ok(Value::UInt(a | b)),
+        (Value::Int(a), Value::UInt(b)) => {
+            Ok(Value::UInt(a as u64 | b))
+        }
+        (Value::UInt(a), Value::Int(b)) => {
+            Ok(Value::UInt(a | b as u64))
+        }
+        (left, right) => Err(ftx.error(format!("bitOr not supported for {left:?} and {right:?}"))),
+    }
+}
+
+/// Bitwise XOR operation.
+pub fn bit_xor(ftx: &FunctionContext, left: Value, right: Value) -> Result<Value> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a ^ b)),
+        (Value::UInt(a), Value::UInt(b)) => Ok(Value::UInt(a ^ b)),
+        (Value::Int(a), Value::UInt(b)) => {
+            Ok(Value::UInt(a as u64 ^ b))
+        }
+        (Value::UInt(a), Value::Int(b)) => {
+            Ok(Value::UInt(a ^ b as u64))
+        }
+        (left, right) => Err(ftx.error(format!("bitXor not supported for {left:?} and {right:?}"))),
+    }
+}
+
+/// Converts a string to lowercase (ASCII only).
+pub fn lower_ascii(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::String(s) => {
+            Ok(Value::String(Arc::new(s.to_lowercase())))
+        }
+        v => Err(ftx.error(format!("lowerAscii not supported for {v:?}"))),
+    }
+}
+
+/// Converts a string to uppercase (ASCII only).
+pub fn upper_ascii(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::String(s) => {
+            Ok(Value::String(Arc::new(s.to_uppercase())))
+        }
+        v => Err(ftx.error(format!("upperAscii not supported for {v:?}"))),
+    }
+}
+
+/// Reverses a list.
+pub fn reverse(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::List(list) => {
+            let mut reversed = list.as_ref().clone();
+            reversed.reverse();
+            Ok(Value::List(Arc::new(reversed)))
+        }
+        v => Err(ftx.error(format!("reverse not supported for {v:?}"))),
+    }
+}
+
+/// Optional map operation: applies a function to the value if present.
+/// Called as: optional.optMap(var_name, expression)
+/// If the optional has a value, binds var_name to that value and evaluates expression.
+pub fn optional_map(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    let opt: &OptionalValue = (&this).try_into()?;
+    
+    // optMap takes 2 arguments: variable name and expression
+    if ftx.args.len() != 2 {
+        return Err(ftx.error("optMap requires 2 arguments: variable name and expression"));
+    }
+    
+    match opt.value() {
+        Some(value) => {
+            // Extract variable name from first argument (should be an identifier)
+            let var_name = match &ftx.args[0].expr {
+                crate::common::ast::Expr::Ident(name) => name.clone(),
+                _ => return Err(ftx.error("optMap first argument must be a variable name")),
+            };
+            
+            // Create a new context with the variable bound
+            let mut new_ctx = ftx.ptx.new_inner_scope();
+            new_ctx.add_variable_from_value(&var_name, value.clone());
+            
+            // Evaluate the expression in the new context
+            let result = Value::resolve(&ftx.args[1], &new_ctx)?;
+            
+            // Return a new optional with the result
+            Ok(Value::Opaque(Arc::new(OptionalValue::of(result))))
+        }
+        None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+    }
+}
+
+/// Optional flat map operation: applies a function that returns an optional.
+/// Called as: optional.optFlatMap(var_name, expression)
+/// If the optional has a value, binds var_name to that value and evaluates expression.
+/// The expression must return an optional value.
+pub fn optional_flat_map(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    let opt: &OptionalValue = (&this).try_into()?;
+    
+    // optFlatMap takes 2 arguments: variable name and expression
+    if ftx.args.len() != 2 {
+        return Err(ftx.error("optFlatMap requires 2 arguments: variable name and expression"));
+    }
+    
+    match opt.value() {
+        Some(value) => {
+            // Extract variable name from first argument (should be an identifier)
+            let var_name = match &ftx.args[0].expr {
+                crate::common::ast::Expr::Ident(name) => name.clone(),
+                _ => return Err(ftx.error("optFlatMap first argument must be a variable name")),
+            };
+            
+            // Create a new context with the variable bound
+            let mut new_ctx = ftx.ptx.new_inner_scope();
+            new_ctx.add_variable_from_value(&var_name, value.clone());
+            
+            // Evaluate the expression in the new context
+            let result = Value::resolve(&ftx.args[1], &new_ctx)?;
+            
+            // The result should be an optional - if it's not, wrap it
+            if let Ok(_result_opt) = <&OptionalValue>::try_from(&result) {
+                Ok(result.clone())
+            } else {
+                // If the expression doesn't return an optional, wrap it
+                Ok(Value::Opaque(Arc::new(OptionalValue::of(result))))
+            }
+        }
+        None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+    }
+}
+
+/// String formatting function (simplified - full implementation would need format spec parsing).
+pub fn format(ftx: &FunctionContext, _format_str: Value, _args: Arguments) -> Result<Value> {
+    // For now, return an error - this needs proper format string parsing
+    Err(ftx.error("format() not yet fully implemented - requires format string parsing"))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::context::Context;

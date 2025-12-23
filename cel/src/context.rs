@@ -203,6 +203,23 @@ impl Default for Context<'_> {
         ctx.add_function("hasValue", functions::optional_has_value);
         ctx.add_function("or", functions::optional_or_optional);
         ctx.add_function("orValue", functions::optional_or_value);
+        ctx.add_function("optMap", functions::optional_map);
+        ctx.add_function("optFlatMap", functions::optional_flat_map);
+        ctx.add_function("greatest", functions::greatest);
+        ctx.add_function("least", functions::least);
+        ctx.add_function("math.greatest", functions::greatest);
+        ctx.add_function("math.least", functions::least);
+        ctx.add_function("trunc", functions::trunc);
+        ctx.add_function("floor", functions::floor);
+        ctx.add_function("ceil", functions::ceil);
+        ctx.add_function("isFinite", functions::is_finite);
+        ctx.add_function("isInf", functions::is_inf);
+        ctx.add_function("bitOr", functions::bit_or);
+        ctx.add_function("bitXor", functions::bit_xor);
+        ctx.add_function("lowerAscii", functions::lower_ascii);
+        ctx.add_function("upperAscii", functions::upper_ascii);
+        ctx.add_function("reverse", functions::reverse);
+        ctx.add_function("format", functions::format);
 
         #[cfg(feature = "regex")]
         ctx.add_function("matches", functions::matches);

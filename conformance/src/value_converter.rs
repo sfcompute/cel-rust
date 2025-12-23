@@ -58,8 +58,9 @@ pub fn proto_value_to_cel_value(proto_value: &ProtoValue) -> Result<CelValue, Co
         Some(crate::proto::cel::expr::value::Kind::ObjectValue(any)) => {
             convert_any_to_cel_value(any)
         }
-        Some(crate::proto::cel::expr::value::Kind::TypeValue(_)) => {
-            Err(ConversionError::Unsupported("type values".to_string()))
+        Some(crate::proto::cel::expr::value::Kind::TypeValue(v)) => {
+            // TypeValue is a string representing a type name
+            Ok(String(Arc::new(v.clone())))
         }
         None => Err(ConversionError::EmptyValue),
     }
