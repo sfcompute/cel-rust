@@ -220,6 +220,7 @@ impl Default for Context<'_> {
         ctx.add_function("map", functions::map_constructor);
         ctx.add_function("null_type", functions::null_type);
         ctx.add_function("math", functions::math_type);
+        ctx.add_function("bool", functions::bool_constructor_default);
         ctx.add_function("bool", functions::bool_constructor);
         ctx.add_function("optional.none", functions::optional_none);
         ctx.add_function("optional.of", functions::optional_of);
@@ -251,6 +252,13 @@ impl Default for Context<'_> {
         ctx.add_function("abs", functions::abs);
         ctx.add_function("math.abs", functions::abs);
         ctx.add_function("math.sign", functions::sign);
+        ctx.add_function("math.pi", functions::math_pi);
+        ctx.add_function("math.e", functions::math_e);
+        ctx.add_function("math.round", functions::round);
+        ctx.add_function("math.floor", functions::floor);
+        ctx.add_function("math.ceil", functions::ceil);
+        ctx.add_function("math.trunc", functions::trunc);
+        ctx.add_function("math.isFinite", functions::is_finite);
         ctx.add_function("lowerAscii", functions::lower_ascii);
         ctx.add_function("upperAscii", functions::upper_ascii);
         ctx.add_function("reverse", functions::reverse);
@@ -274,9 +282,9 @@ impl Default for Context<'_> {
             ctx.add_function("getDayOfMonth", functions::time::timestamp_month_day);
             ctx.add_function("getDate", functions::time::timestamp_date);
             ctx.add_function("getDayOfWeek", functions::time::timestamp_weekday);
-            ctx.add_function("getHours", functions::time::timestamp_hours);
-            ctx.add_function("getMinutes", functions::time::timestamp_minutes);
-            ctx.add_function("getSeconds", functions::time::timestamp_seconds);
+            ctx.add_function("getHours", functions::time::get_hours);
+            ctx.add_function("getMinutes", functions::time::get_minutes);
+            ctx.add_function("getSeconds", functions::time::get_seconds);
             ctx.add_function("getMilliseconds", functions::time::timestamp_millis);
         }
 

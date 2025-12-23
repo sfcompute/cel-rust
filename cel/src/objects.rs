@@ -784,6 +784,39 @@ impl From<Value> for ResolveResult {
 }
 
 impl Value {
+    /// Unwraps protobuf wrapper types to their primitive values
+    /// For large integers that exceed JSON safe range, converts to string
+    fn unwrap_protobuf_wrapper(self) -> Value {
+        if let Value::Struct(ref s) = self {
+            if s.type_name.as_str().starts_with("google.protobuf.") && 
+               s.type_name.as_str().ends_with("Value") {
+                if let Some(value) = s.fields.get("value") {
+                    // For Int64Value and UInt64Value, check if the value exceeds JSON safe range
+                    match (s.type_name.as_str(), value) {
+                        ("google.protobuf.Int64Value", Value::Int(i)) => {
+                            // JSON safe integer range is -(2^53-1) to 2^53-1
+                            const MAX_SAFE_INT: i64 = 9007199254740991; // 2^53-1
+                            const MIN_SAFE_INT: i64 = -9007199254740991; // -(2^53-1)
+                            if *i > MAX_SAFE_INT || *i < MIN_SAFE_INT {
+                                return Value::String(Arc::new(i.to_string()));
+                            }
+                        }
+                        ("google.protobuf.UInt64Value", Value::UInt(u)) => {
+                            // JSON safe integer range for unsigned is 0 to 2^53-1
+                            const MAX_SAFE_UINT: u64 = 9007199254740991; // 2^53-1
+                            if *u > MAX_SAFE_UINT {
+                                return Value::String(Arc::new(u.to_string()));
+                            }
+                        }
+                        _ => {}
+                    }
+                    return value.clone();
+                }
+            }
+        }
+        self
+    }
+
     pub fn resolve_all(expr: &[Expression], ctx: &Context) -> ResolveResult {
         let mut res = Vec::with_capacity(expr.len());
         for expr in expr {
@@ -1402,7 +1435,7 @@ impl Value {
             Value::Map(ref m) => m.map.get(&name.clone().into()).cloned(),
             Value::Struct(ref s) => {
                 if let Some(value) = s.fields.get(name.as_str()) {
-                    Some(value.clone())
+                    Some(value.clone().unwrap_protobuf_wrapper())
                 } else {
                     // For proto2, unset optional fields have default values
                     // Try to infer the default from the field name
@@ -1507,6 +1540,20 @@ impl ops::Add<Value> for Value {
                 // `l` is replaced with a clone otherwise.
                 Arc::make_mut(&mut l).push_str(&r);
                 Ok(Value::String(l))
+            }
+            (Value::Bytes(mut l), Value::Bytes(mut r)) => {
+                // If this is the only reference to `l`, we can append to it in place.
+                // `l` is replaced with a clone otherwise.
+                let l_vec = Arc::make_mut(&mut l);
+                
+                // Likewise, if this is the only reference to `r`, we can move its values
+                // instead of cloning them.
+                match Arc::get_mut(&mut r) {
+                    Some(r_vec) => l_vec.append(r_vec),
+                    None => l_vec.extend_from_slice(&r),
+                }
+                
+                Ok(Value::Bytes(l))
             }
             #[cfg(feature = "chrono")]
             (Value::Duration(l), Value::Duration(r)) => l
