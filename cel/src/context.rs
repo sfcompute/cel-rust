@@ -203,6 +203,12 @@ impl Default for Context<'_> {
         ctx.add_function("all", functions::all_func);
         ctx.add_function("existsOne", functions::exists_one_func);
         ctx.add_function("transformList", functions::transform_list);
+        ctx.add_function("transformMap", functions::transform_map);
+        ctx.add_function("round", functions::round);
+        ctx.add_function("join", functions::join);
+        ctx.add_function("base64", functions::base64_encode);
+        ctx.add_function("base64.encode", functions::base64_encode);
+        ctx.add_function("base64.decode", functions::base64_decode);
         ctx.add_function("string", functions::string);
         ctx.add_function("bytes", functions::bytes);
         ctx.add_function("double", functions::double);

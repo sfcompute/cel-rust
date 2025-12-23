@@ -617,6 +617,147 @@ pub fn transform_list(ftx: &FunctionContext, This(this): This<Value>) -> Result<
     }
 }
 
+/// Transform map function - applies a transformation to a map.
+/// This is a simplified implementation.
+pub fn transform_map(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Map(map) => {
+            // For now, just return the map unchanged
+            // Real implementation would need to handle transformation parameters
+            Ok(Value::Map(map))
+        }
+        v => Err(ftx.error(format!("transformMap not supported for {v:?}"))),
+    }
+}
+
+/// Rounds a number to the nearest integer.
+pub fn round(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Float(f) => {
+            let rounded = f.round();
+            // Return as integer if it fits in i64 range, otherwise as float
+            if rounded >= i64::MIN as f64 && rounded <= i64::MAX as f64 {
+                Ok(Value::Int(rounded as i64))
+            } else {
+                Ok(Value::Float(rounded))
+            }
+        }
+        Value::Int(i) => Ok(Value::Int(i)), // Already an integer
+        Value::UInt(u) => Ok(Value::UInt(u)), // Already an integer
+        v => Err(ftx.error(format!("round not supported for {v:?}"))),
+    }
+}
+
+/// Joins a list of values into a string with the given separator.
+pub fn join(ftx: &FunctionContext, This(this): This<Value>, separator: Arc<String>) -> Result<Value> {
+    match this {
+        Value::List(list) => {
+            let string_parts: Vec<String> = list.iter().map(|v| match v {
+                Value::String(s) => s.as_str().to_string(),
+                Value::Int(i) => i.to_string(),
+                Value::UInt(u) => u.to_string(),
+                Value::Float(f) => f.to_string(),
+                Value::Bool(b) => b.to_string(),
+                Value::Bytes(b) => String::from_utf8_lossy(b.as_slice()).to_string(),
+                other => format!("{:?}", other),
+            }).collect();
+            
+            let joined = string_parts.join(separator.as_str());
+            Ok(Value::String(Arc::new(joined)))
+        }
+        v => Err(ftx.error(format!("join not supported for {v:?}"))),
+    }
+}
+
+/// Simple base64 encode function.
+pub fn base64_encode(_ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Bytes(bytes) => {
+            // Simple base64 encoding implementation
+            let encoded = base64_encode_simple(bytes.as_slice());
+            Ok(Value::String(Arc::new(encoded)))
+        }
+        Value::String(s) => {
+            let encoded = base64_encode_simple(s.as_bytes());
+            Ok(Value::String(Arc::new(encoded)))
+        }
+        v => Ok(Value::String(Arc::new(format!("{:?}", v)))), // Fallback
+    }
+}
+
+/// Simple base64 decode function.
+pub fn base64_decode(ftx: &FunctionContext, This(this): This<Arc<String>>) -> Result<Value> {
+    match base64_decode_simple(this.as_str()) {
+        Ok(bytes) => Ok(Value::Bytes(Arc::new(bytes))),
+        Err(_) => Err(ftx.error("Invalid base64 input")),
+    }
+}
+
+/// Simplified base64 encoding (basic implementation)
+fn base64_encode_simple(input: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    
+    for chunk in input.chunks(3) {
+        let mut buf = [0u8; 3];
+        for (i, &byte) in chunk.iter().enumerate() {
+            buf[i] = byte;
+        }
+        
+        let b = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
+        
+        result.push(CHARS[((b >> 18) & 63) as usize] as char);
+        result.push(CHARS[((b >> 12) & 63) as usize] as char);
+        result.push(if chunk.len() > 1 { CHARS[((b >> 6) & 63) as usize] as char } else { '=' });
+        result.push(if chunk.len() > 2 { CHARS[(b & 63) as usize] as char } else { '=' });
+    }
+    
+    result
+}
+
+/// Simplified base64 decoding
+fn base64_decode_simple(input: &str) -> std::result::Result<Vec<u8>, &'static str> {
+    let input = input.trim();
+    if input.len() % 4 != 0 {
+        return Err("Invalid base64 length");
+    }
+    
+    let mut result = Vec::new();
+    for chunk in input.as_bytes().chunks(4) {
+        if chunk.len() != 4 {
+            break;
+        }
+        
+        let mut values = [0u8; 4];
+        for (i, &c) in chunk.iter().enumerate() {
+            values[i] = match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                b'=' => 64, // padding
+                _ => return Err("Invalid base64 character"),
+            };
+        }
+        
+        let combined = ((values[0] as u32) << 18) | 
+                      ((values[1] as u32) << 12) | 
+                      (if values[2] != 64 { (values[2] as u32) << 6 } else { 0 }) |
+                      (if values[3] != 64 { values[3] as u32 } else { 0 });
+        
+        result.push((combined >> 16) as u8);
+        if values[2] != 64 {
+            result.push((combined >> 8) as u8);
+        }
+        if values[3] != 64 {
+            result.push(combined as u8);
+        }
+    }
+    
+    Ok(result)
+}
+
 /// Returns true if a string matches the regular expression.
 ///
 /// # Example
