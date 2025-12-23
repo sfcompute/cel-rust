@@ -184,7 +184,10 @@ pub fn string(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         Value::Int(v) => Value::String(v.to_string().into()),
         Value::UInt(v) => Value::String(v.to_string().into()),
         Value::Float(v) => Value::String(v.to_string().into()),
-        Value::Bytes(v) => Value::String(Arc::new(String::from_utf8_lossy(v.as_slice()).into())),
+        Value::Bytes(v) => match String::from_utf8(v.as_ref().clone()) {
+            Ok(s) => Value::String(Arc::new(s)),
+            Err(_) => return Err(ftx.error("invalid UTF-8")),
+        },
         Value::Struct(ref s) => {
             // Handle protobuf wrapper types by extracting their value field
             if s.type_name.as_str().starts_with("google.protobuf.") && 
@@ -200,8 +203,12 @@ pub fn string(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     })
 }
 
-pub fn bytes(value: Arc<String>) -> Result<Value> {
-    Ok(Value::Bytes(value.as_bytes().to_vec().into()))
+pub fn bytes(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::String(s) => Value::Bytes(s.as_bytes().to_vec().into()),
+        Value::Bytes(b) => Value::Bytes(b.clone()),
+        v => return Err(ftx.error(format!("bytes not supported for {v:?}"))),
+    })
 }
 
 // Performs a type conversion on the target.
@@ -353,6 +360,33 @@ pub fn bool_constructor_default(_ftx: &FunctionContext) -> Result<Value> {
 /// Returns "string" as the type name when called without arguments (type denotation)
 pub fn string_type(_ftx: &FunctionContext) -> Result<Value> {
     Ok(Value::String(Arc::new("string".to_string())))
+}
+
+/// Returns the runtime type of a value as a string
+pub fn type_of(This(this): This<Value>) -> Result<Value> {
+    let type_name = match this {
+        Value::Bool(_) => "bool",
+        Value::Int(_) => "int",
+        Value::UInt(_) => "uint", 
+        Value::Float(_) => "double",
+        Value::String(_) => "string",
+        Value::Bytes(_) => "bytes",
+        Value::List(_) => "list",
+        Value::Map(_) => "map",
+        Value::Null => "null_type",
+        #[cfg(feature = "chrono")]
+        Value::Timestamp(_) => "google.protobuf.Timestamp",
+        #[cfg(feature = "chrono")]
+        Value::Duration(_) => "google.protobuf.Duration",
+        Value::Struct(_) => "map", // Structs are treated as maps in CEL
+        _ => "unknown",
+    };
+    Ok(Value::String(Arc::new(type_name.to_string())))
+}
+
+/// Returns the "type" type value (type denotation)
+pub fn type_type(_ftx: &FunctionContext) -> Result<Value> {
+    Ok(Value::String(Arc::new("type".to_string())))
 }
 
 /// Returns 0.0 as the default double value. Used for type denotation.

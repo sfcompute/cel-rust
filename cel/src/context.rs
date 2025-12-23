@@ -1,8 +1,8 @@
 use crate::magic::{Function, FunctionRegistry, IntoFunction};
-use crate::objects::{TryIntoValue, Value};
+use crate::objects::{Key, Map, TryIntoValue, Value};
 use crate::parser::Expression;
 use crate::{functions, ExecutionError};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Context is a collection of variables and functions that can be used
@@ -263,6 +263,22 @@ impl Default for Context<'_> {
         ctx.add_function("upperAscii", functions::upper_ascii);
         ctx.add_function("reverse", functions::reverse);
         ctx.add_function("format", functions::format);
+        ctx.add_function("type", functions::type_of);
+        ctx.add_variable("type", Value::String(Arc::new("type".to_string())));
+        ctx.add_variable("null_type", Value::String(Arc::new("null_type".to_string())));
+        ctx.add_variable("optional_type", Value::String(Arc::new("optional_type".to_string())));
+        ctx.add_variable("double", Value::String(Arc::new("double".to_string())));
+        ctx.add_variable("bool", Value::String(Arc::new("bool".to_string())));
+        ctx.add_variable("int", Value::String(Arc::new("int".to_string())));
+        ctx.add_variable("uint", Value::String(Arc::new("uint".to_string())));
+        ctx.add_variable("string", Value::String(Arc::new("string".to_string())));
+        ctx.add_variable("bytes", Value::String(Arc::new("bytes".to_string())));
+        ctx.add_variable("list", Value::String(Arc::new("list".to_string())));
+        ctx.add_variable("map", Value::String(Arc::new("map".to_string())));
+        
+        // Google protobuf type constants
+        ctx.add_variable("google.protobuf.Timestamp", Value::String(Arc::new("google.protobuf.Timestamp".to_string())));
+        ctx.add_variable("google.protobuf.Duration", Value::String(Arc::new("google.protobuf.Duration".to_string())));
 
         #[cfg(feature = "regex")]
         ctx.add_function("matches", functions::matches);
