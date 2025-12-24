@@ -1344,7 +1344,7 @@ pub mod time {
     pub fn timestamp_from_int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         match this {
             Value::Int(secs) => {
-                use chrono::{DateTime, FixedOffset, TimeZone};
+                use chrono::{FixedOffset, TimeZone};
                 let ts = FixedOffset::east_opt(0)
                     .unwrap()
                     .timestamp_opt(secs, 0)
@@ -2125,8 +2125,6 @@ fn format_float(f: f64, precision: usize, scientific: bool) -> std::result::Resu
 /// This handles all types including lists, maps, timestamps, durations, etc.
 /// Returns an error if the value contains an unsupported type (e.g., proto structs).
 fn format_value_as_string(value: &Value) -> std::result::Result<String, String> {
-    use crate::objects::Value::*;
-
     match value {
         Value::Null => Ok("null".to_string()),
         Value::Bool(b) => Ok(b.to_string()),

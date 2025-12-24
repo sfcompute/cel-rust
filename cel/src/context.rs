@@ -1,8 +1,8 @@
 use crate::magic::{Function, FunctionRegistry, IntoFunction};
-use crate::objects::{Key, Map, TryIntoValue, Value};
+use crate::objects::{TryIntoValue, Value};
 use crate::parser::Expression;
 use crate::{functions, ExecutionError};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Context is a collection of variables and functions that can be used
