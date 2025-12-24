@@ -1977,7 +1977,12 @@ fn format_value(
     match (conversion, value) {
         ('s', _) => {
             // String conversion - handles all types
-            Ok(format_value_as_string(value))
+            format_value_as_string(value).map_err(|e| {
+                ExecutionError::FunctionError {
+                    function: "format".to_string(),
+                    message: format!("error during formatting: {}", e),
+                }
+            })
         }
         ('d', Value::Int(i)) => Ok(i.to_string()),
         ('d', Value::UInt(u)) => Ok(u.to_string()),
@@ -2118,63 +2123,61 @@ fn format_float(f: f64, precision: usize, scientific: bool) -> std::result::Resu
 
 /// Formats a value as a string (for %s conversion).
 /// This handles all types including lists, maps, timestamps, durations, etc.
-fn format_value_as_string(value: &Value) -> String {
+/// Returns an error if the value contains an unsupported type (e.g., proto structs).
+fn format_value_as_string(value: &Value) -> std::result::Result<String, String> {
     use crate::objects::Value::*;
-    
+
     match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::UInt(u) => u.to_string(),
+        Value::Null => Ok("null".to_string()),
+        Value::Bool(b) => Ok(b.to_string()),
+        Value::Int(i) => Ok(i.to_string()),
+        Value::UInt(u) => Ok(u.to_string()),
         Value::Float(f) => {
             if f.is_nan() {
-                "NaN".to_string()
+                Ok("NaN".to_string())
             } else if f.is_infinite() {
                 if f.is_sign_negative() {
-                    "-Infinity".to_string()
+                    Ok("-Infinity".to_string())
                 } else {
-                    "Infinity".to_string()
+                    Ok("Infinity".to_string())
                 }
             } else {
                 // Remove trailing zeros and decimal point if not needed
                 let s = f.to_string();
                 if s.contains('.') {
-                    s.trim_end_matches('0').trim_end_matches('.').to_string()
+                    Ok(s.trim_end_matches('0').trim_end_matches('.').to_string())
                 } else {
-                    s
+                    Ok(s)
                 }
             }
         }
-        Value::String(s) => s.as_str().to_string(),
+        Value::String(s) => Ok(s.as_str().to_string()),
         Value::Bytes(b) => {
             // Convert bytes to string using from_utf8_lossy
-            std::string::String::from_utf8_lossy(b.as_slice()).replace('\u{fffd}', "\u{fffd}")
+            Ok(std::string::String::from_utf8_lossy(b.as_slice()).replace('\u{fffd}', "\u{fffd}"))
         }
         Value::List(list) => {
-            let items: Vec<std::string::String> = list.iter().map(|v| format_value_as_string(v)).collect();
-            format!("[{}]", items.join(", "))
+            let mut items = Vec::new();
+            for v in list.iter() {
+                items.push(format_value_as_string(v)?);
+            }
+            Ok(format!("[{}]", items.join(", ")))
         }
         Value::Map(map) => {
-            // Sort keys by their string representation
-            let mut entries: Vec<(std::string::String, std::string::String)> = map.map.iter()
-                .map(|(k, v)| (format_key_as_string(k), format_value_as_string(v)))
-                .collect();
+            let mut entries: Vec<(std::string::String, std::string::String)> = Vec::new();
+            for (k, v) in map.map.iter() {
+                entries.push((format_key_as_string(k), format_value_as_string(v)?));
+            }
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             let pairs: Vec<std::string::String> = entries.iter()
                 .map(|(k, v)| format!("{}: {}", k, v))
                 .collect();
-            format!("{{{}}}", pairs.join(", "))
+            Ok(format!("{{{}}}", pairs.join(", ")))
         }
         Value::Struct(s) => {
-            // Format struct fields
-            let mut entries: Vec<(std::string::String, std::string::String)> = s.fields.iter()
-                .map(|(k, v): (&std::string::String, &Value)| (k.clone(), format_value_as_string(v)))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let pairs: Vec<std::string::String> = entries.iter()
-                .map(|(k, v)| format!("{}: {}", k, v))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
+            // Proto structs are not allowed in format strings
+            let type_name = s.type_name.as_str();
+            Err(format!("string clause can only be used on strings, bools, bytes, ints, doubles, maps, lists, types, durations, and timestamps, was given {}", type_name))
         }
         #[cfg(feature = "chrono")]
         Value::Timestamp(t) => {
@@ -2188,7 +2191,7 @@ fn format_value_as_string(value: &Value) -> String {
                 utc.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
             };
             // Replace '+00:00' with 'Z' for UTC timestamps
-            formatted.replace("+00:00", "Z")
+            Ok(formatted.replace("+00:00", "Z"))
         }
         #[cfg(feature = "chrono")]
         Value::Duration(d) => {
@@ -2196,26 +2199,26 @@ fn format_value_as_string(value: &Value) -> String {
             let total_secs = d.num_seconds();
             let nanos = d.num_nanoseconds().unwrap_or(0) % 1_000_000_000;
             if nanos == 0 {
-                format!("{}s", total_secs)
+                Ok(format!("{}s", total_secs))
             } else {
                 // Include fractional seconds
                 let frac = (nanos as f64) / 1_000_000_000.0;
                 let total = total_secs as f64 + frac;
-                format!("{}s", total)
+                Ok(format!("{}s", total))
             }
         }
         // Dyn values are wrapped in Opaque, handle them there
-        Value::Function(_, _) => "<function>".to_string(),
+        Value::Function(_, _) => Ok("<function>".to_string()),
         Value::Opaque(_) => {
             // Try to convert OptionalValue
             if let Ok(opt) = <&OptionalValue>::try_from(value) {
                 if let Some(inner) = opt.value() {
                     format_value_as_string(inner)
                 } else {
-                    "null".to_string()
+                    Ok("null".to_string())
                 }
             } else {
-                "<opaque>".to_string()
+                Ok("<opaque>".to_string())
             }
         }
     }

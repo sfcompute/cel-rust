@@ -1715,28 +1715,36 @@ impl Value {
                             // 2-parameter form: iterate with value only
                             let mut last_error = None;
                             for item in items.deref() {
+                                // Check loop condition BEFORE evaluating step
+                                // If it's false, we've found a determining result, exit without error
                                 if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                    // Loop condition is false, stop iterating
-                                    // If we stopped because @result is strictly false, don't propagate errors
                                     last_error = None;
                                     break;
                                 }
+
                                 ctx.add_variable_from_value(&comprehension.iter_var, item.clone());
 
-                                // Try to resolve the loop step, catching errors for short-circuit semantics
+                                // Try to resolve the loop step
                                 match Value::resolve(&comprehension.loop_step, &ctx) {
                                     Ok(accu) => {
                                         ctx.add_variable_from_value(&comprehension.accu_var, accu);
-                                        last_error = None; // Clear any previous error
+
+                                        // Check if the loop condition is now false (result determined)
+                                        if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                                            last_error = None;
+                                            break;
+                                        }
                                     }
                                     Err(e) => {
-                                        // Store the error but continue - we might find a false value later
-                                        last_error = Some(e);
+                                        // Save the first error encountered
+                                        if last_error.is_none() {
+                                            last_error = Some(e);
+                                        }
                                         // Don't update @result, keep the previous value
                                     }
                                 }
                             }
-                            // If we exited the loop with an error and didn't find a false, propagate it
+                            // If we exited with an error and didn't find a determining result, propagate it
                             if let Some(err) = last_error {
                                 return Err(err);
                             }
