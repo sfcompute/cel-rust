@@ -851,6 +851,62 @@ impl Value {
         Ok(Value::List(res.into()))
     }
 
+    /// Try to resolve a qualified identifier by extracting the full path from a Select chain
+    /// and attempting longest-prefix matching. For example, if we have Select(Select(Ident("a"), "b"), "c"),
+    /// this reconstructs "a.b.c" and tries:
+    /// 1. "a.b.c" (exact match)
+    /// 2. "a.b" with field "c"
+    /// 3. "a" with fields "b" and "c"
+    fn try_qualified_lookup(
+        operand: &Expression,
+        field: &str,
+        ctx: &Context,
+    ) -> Result<Option<Value>, ExecutionError> {
+        // Build the full path by walking the Select chain
+        let mut parts = vec![field];
+        let mut current = operand;
+
+        loop {
+            match &current.expr {
+                Expr::Select(select) => {
+                    parts.push(&select.field);
+                    current = &select.operand;
+                }
+                Expr::Ident(name) => {
+                    parts.push(name.as_str());
+                    break;
+                }
+                _ => {
+                    // Not a qualified identifier chain
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Reverse to get the correct order (we built it backwards)
+        parts.reverse();
+        let full_path = parts.join(".");
+
+        // Try exact match first
+        if let Ok(value) = ctx.get_variable(&full_path) {
+            return Ok(Some(value));
+        }
+
+        // Try longest-prefix matching
+        for i in (1..parts.len()).rev() {
+            let prefix = parts[..i].join(".");
+            if let Ok(mut value) = ctx.get_variable(&prefix) {
+                // Found a prefix - now perform field selections for remaining parts
+                for &field_name in &parts[i..] {
+                    value = value.member(field_name)?;
+                }
+                return Ok(Some(value));
+            }
+        }
+
+        Ok(None)
+    }
+
     #[inline(always)]
     pub fn resolve(expr: &Expression, ctx: &Context) -> ResolveResult {
         match &expr.expr {
@@ -858,7 +914,12 @@ impl Value {
             Expr::Call(call) => {
                 if call.args.len() == 3 && call.func_name == operators::CONDITIONAL {
                     let cond = Value::resolve(&call.args[0], ctx)?;
-                    return if cond.to_bool()? {
+                    // CEL requires strict boolean type for ternary condition
+                    let cond_bool = match cond {
+                        Value::Bool(b) => b,
+                        _ => return Err(ExecutionError::NoSuchOverload),
+                    };
+                    return if cond_bool {
                         Value::resolve(&call.args[1], ctx)
                     } else {
                         Value::resolve(&call.args[2], ctx)
@@ -903,42 +964,214 @@ impl Value {
                         operators::LESS => {
                             let left = Value::resolve(&call.args[0], ctx)?;
                             let right = Value::resolve(&call.args[1], ctx)?;
-                            return Value::Bool(
-                                left.partial_cmp(&right)
-                                    .ok_or(ExecutionError::ValuesNotComparable(left, right))?
-                                    == Ordering::Less,
-                            )
-                            .into();
+
+                            // CEL requires strict type checking for comparisons
+                            let result = match (&left, &right) {
+                                // Allow same-type comparisons
+                                (Value::Int(l), Value::Int(r)) => l < r,
+                                (Value::UInt(l), Value::UInt(r)) => l < r,
+                                (Value::Float(l), Value::Float(r)) => l < r,
+                                (Value::String(l), Value::String(r)) => l < r,
+                                (Value::Bytes(l), Value::Bytes(r)) => l < r,
+                                #[cfg(feature = "chrono")]
+                                (Value::Timestamp(l), Value::Timestamp(r)) => l < r,
+                                #[cfg(feature = "chrono")]
+                                (Value::Duration(l), Value::Duration(r)) => l < r,
+
+                                // Allow cross-numeric comparisons
+                                (Value::Int(a), Value::UInt(b)) => {
+                                    match TryInto::<u64>::try_into(*a) {
+                                        Ok(a_u64) => a_u64 < *b,
+                                        Err(_) => true, // negative int < any uint
+                                    }
+                                }
+                                (Value::Int(a), Value::Float(b)) => (*a as f64) < *b,
+                                (Value::UInt(a), Value::Int(b)) => {
+                                    match TryInto::<i64>::try_into(*a) {
+                                        Ok(a_i64) => a_i64 < *b,
+                                        Err(_) => false, // uint > i64::MAX
+                                    }
+                                }
+                                (Value::UInt(a), Value::Float(b)) => (*a as f64) < *b,
+                                (Value::Float(a), Value::Int(b)) => *a < (*b as f64),
+                                (Value::Float(a), Value::UInt(b)) => *a < (*b as f64),
+                                (Value::Bool(a), Value::Bool(b)) => a < b,
+
+                                // Explicitly reject List, Map, Null, and other unsupported types
+                                (Value::List(_), _) | (_, Value::List(_)) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+                                (Value::Map(_), _) | (_, Value::Map(_)) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+                                (Value::Null, _) | (_, Value::Null) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+
+                                // All other type combinations are not supported
+                                _ => return Err(ExecutionError::NoSuchOverload),
+                            };
+
+                            return Value::Bool(result).into();
                         }
                         operators::LESS_EQUALS => {
                             let left = Value::resolve(&call.args[0], ctx)?;
                             let right = Value::resolve(&call.args[1], ctx)?;
-                            return Value::Bool(
-                                left.partial_cmp(&right)
-                                    .ok_or(ExecutionError::ValuesNotComparable(left, right))?
-                                    != Ordering::Greater,
-                            )
-                            .into();
+
+                            // CEL requires strict type checking for comparisons
+                            let result = match (&left, &right) {
+                                // Allow same-type comparisons
+                                (Value::Int(l), Value::Int(r)) => l <= r,
+                                (Value::UInt(l), Value::UInt(r)) => l <= r,
+                                (Value::Float(l), Value::Float(r)) => l <= r,
+                                (Value::String(l), Value::String(r)) => l <= r,
+                                (Value::Bytes(l), Value::Bytes(r)) => l <= r,
+                                #[cfg(feature = "chrono")]
+                                (Value::Timestamp(l), Value::Timestamp(r)) => l <= r,
+                                #[cfg(feature = "chrono")]
+                                (Value::Duration(l), Value::Duration(r)) => l <= r,
+
+                                // Allow cross-numeric comparisons
+                                (Value::Int(a), Value::UInt(b)) => {
+                                    match TryInto::<u64>::try_into(*a) {
+                                        Ok(a_u64) => a_u64 <= *b,
+                                        Err(_) => true, // negative int <= any uint
+                                    }
+                                }
+                                (Value::Int(a), Value::Float(b)) => (*a as f64) <= *b,
+                                (Value::UInt(a), Value::Int(b)) => {
+                                    match TryInto::<i64>::try_into(*a) {
+                                        Ok(a_i64) => a_i64 <= *b,
+                                        Err(_) => false, // uint > i64::MAX
+                                    }
+                                }
+                                (Value::UInt(a), Value::Float(b)) => (*a as f64) <= *b,
+                                (Value::Float(a), Value::Int(b)) => *a <= (*b as f64),
+                                (Value::Float(a), Value::UInt(b)) => *a <= (*b as f64),
+                                (Value::Bool(a), Value::Bool(b)) => a <= b,
+
+                                // Explicitly reject List, Map, Null, and other unsupported types
+                                (Value::List(_), _) | (_, Value::List(_)) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+                                (Value::Map(_), _) | (_, Value::Map(_)) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+                                (Value::Null, _) | (_, Value::Null) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+
+                                // All other type combinations are not supported
+                                _ => return Err(ExecutionError::NoSuchOverload),
+                            };
+
+                            return Value::Bool(result).into();
                         }
                         operators::GREATER => {
                             let left = Value::resolve(&call.args[0], ctx)?;
                             let right = Value::resolve(&call.args[1], ctx)?;
-                            return Value::Bool(
-                                left.partial_cmp(&right)
-                                    .ok_or(ExecutionError::ValuesNotComparable(left, right))?
-                                    == Ordering::Greater,
-                            )
-                            .into();
+
+                            // CEL requires strict type checking for comparisons
+                            let result = match (&left, &right) {
+                                // Allow same-type comparisons
+                                (Value::Int(l), Value::Int(r)) => l > r,
+                                (Value::UInt(l), Value::UInt(r)) => l > r,
+                                (Value::Float(l), Value::Float(r)) => l > r,
+                                (Value::String(l), Value::String(r)) => l > r,
+                                (Value::Bytes(l), Value::Bytes(r)) => l > r,
+                                #[cfg(feature = "chrono")]
+                                (Value::Timestamp(l), Value::Timestamp(r)) => l > r,
+                                #[cfg(feature = "chrono")]
+                                (Value::Duration(l), Value::Duration(r)) => l > r,
+
+                                // Allow cross-numeric comparisons
+                                (Value::Int(a), Value::UInt(b)) => {
+                                    match TryInto::<u64>::try_into(*a) {
+                                        Ok(a_u64) => a_u64 > *b,
+                                        Err(_) => false, // negative int < any uint
+                                    }
+                                }
+                                (Value::Int(a), Value::Float(b)) => (*a as f64) > *b,
+                                (Value::UInt(a), Value::Int(b)) => {
+                                    match TryInto::<i64>::try_into(*a) {
+                                        Ok(a_i64) => a_i64 > *b,
+                                        Err(_) => true, // uint > i64::MAX
+                                    }
+                                }
+                                (Value::UInt(a), Value::Float(b)) => (*a as f64) > *b,
+                                (Value::Float(a), Value::Int(b)) => *a > (*b as f64),
+                                (Value::Float(a), Value::UInt(b)) => *a > (*b as f64),
+                                (Value::Bool(a), Value::Bool(b)) => a > b,
+
+                                // Explicitly reject List, Map, Null, and other unsupported types
+                                (Value::List(_), _) | (_, Value::List(_)) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+                                (Value::Map(_), _) | (_, Value::Map(_)) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+                                (Value::Null, _) | (_, Value::Null) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+
+                                // All other type combinations are not supported
+                                _ => return Err(ExecutionError::NoSuchOverload),
+                            };
+
+                            return Value::Bool(result).into();
                         }
                         operators::GREATER_EQUALS => {
                             let left = Value::resolve(&call.args[0], ctx)?;
                             let right = Value::resolve(&call.args[1], ctx)?;
-                            return Value::Bool(
-                                left.partial_cmp(&right)
-                                    .ok_or(ExecutionError::ValuesNotComparable(left, right))?
-                                    != Ordering::Less,
-                            )
-                            .into();
+
+                            // CEL requires strict type checking for comparisons
+                            let result = match (&left, &right) {
+                                // Allow same-type comparisons
+                                (Value::Int(l), Value::Int(r)) => l >= r,
+                                (Value::UInt(l), Value::UInt(r)) => l >= r,
+                                (Value::Float(l), Value::Float(r)) => l >= r,
+                                (Value::String(l), Value::String(r)) => l >= r,
+                                (Value::Bytes(l), Value::Bytes(r)) => l >= r,
+                                #[cfg(feature = "chrono")]
+                                (Value::Timestamp(l), Value::Timestamp(r)) => l >= r,
+                                #[cfg(feature = "chrono")]
+                                (Value::Duration(l), Value::Duration(r)) => l >= r,
+
+                                // Allow cross-numeric comparisons
+                                (Value::Int(a), Value::UInt(b)) => {
+                                    match TryInto::<u64>::try_into(*a) {
+                                        Ok(a_u64) => a_u64 >= *b,
+                                        Err(_) => false, // negative int < any uint
+                                    }
+                                }
+                                (Value::Int(a), Value::Float(b)) => (*a as f64) >= *b,
+                                (Value::UInt(a), Value::Int(b)) => {
+                                    match TryInto::<i64>::try_into(*a) {
+                                        Ok(a_i64) => a_i64 >= *b,
+                                        Err(_) => true, // uint > i64::MAX
+                                    }
+                                }
+                                (Value::UInt(a), Value::Float(b)) => (*a as f64) >= *b,
+                                (Value::Float(a), Value::Int(b)) => *a >= (*b as f64),
+                                (Value::Float(a), Value::UInt(b)) => *a >= (*b as f64),
+                                (Value::Bool(a), Value::Bool(b)) => a >= b,
+
+                                // Explicitly reject List, Map, Null, and other unsupported types
+                                (Value::List(_), _) | (_, Value::List(_)) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+                                (Value::Map(_), _) | (_, Value::Map(_)) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+                                (Value::Null, _) | (_, Value::Null) => {
+                                    return Err(ExecutionError::NoSuchOverload);
+                                }
+
+                                // All other type combinations are not supported
+                                _ => return Err(ExecutionError::NoSuchOverload),
+                            };
+
+                            return Value::Bool(result).into();
                         }
                         operators::IN => {
                             let left = Value::resolve(&call.args[0], ctx)?;
@@ -960,68 +1193,90 @@ impl Value {
                             }
                         }
                         operators::LOGICAL_OR => {
-                            // CEL semantics for ||: 
-                            // If left is truthy, return it (short-circuit)
-                            // If left errors, evaluate right - if right is truthy, return it; otherwise return error
-                            match Value::resolve(&call.args[0], ctx) {
-                                Ok(left) => {
-                                    if left.to_bool().unwrap_or(false) {
-                                        return Ok(left.into());
+                            // CEL OR semantics: result is true if either side is true (bool)
+                            // Type errors can be short-circuited if the other side determines the result
+                            let left_result = Value::resolve(&call.args[0], ctx);
+                            let right_result = Value::resolve(&call.args[1], ctx);
+
+                            match (left_result, right_result) {
+                                (Ok(left), Ok(right)) => {
+                                    // If either side is Bool(true), return true
+                                    if matches!(left, Value::Bool(true)) {
+                                        return Ok(Value::Bool(true).into());
                                     }
-                                    // Left is false, evaluate right
-                                    return Value::resolve(&call.args[1], ctx);
+                                    if matches!(right, Value::Bool(true)) {
+                                        return Ok(Value::Bool(true).into());
+                                    }
+                                    // If both are Bool(false), return false
+                                    if matches!(left, Value::Bool(false)) && matches!(right, Value::Bool(false)) {
+                                        return Ok(Value::Bool(false).into());
+                                    }
+                                    // One or both sides are non-bool and neither is true
+                                    return Err(ExecutionError::NoSuchOverload);
                                 }
-                                Err(left_error) => {
-                                    // Left errored, check if right can determine the result
-                                    match Value::resolve(&call.args[1], ctx) {
-                                        Ok(right) => {
-                                            if right.to_bool().unwrap_or(false) {
-                                                // Right is truthy, return it (error is masked)
-                                                return Ok(right.into());
-                                            }
-                                            // Right is falsy, propagate left error
-                                            return Err(left_error);
-                                        }
-                                        Err(_) => {
-                                            // Both sides errored, propagate left error
-                                            return Err(left_error);
-                                        }
+                                (Err(left_error), Ok(right)) => {
+                                    // Left errored, check if right can determine result
+                                    if matches!(right, Value::Bool(true)) {
+                                        return Ok(Value::Bool(true).into());
                                     }
+                                    // Right doesn't determine result, propagate left error
+                                    return Err(left_error);
+                                }
+                                (Ok(left), Err(right_error)) => {
+                                    // Right errored, check if left can determine result
+                                    if matches!(left, Value::Bool(true)) {
+                                        return Ok(Value::Bool(true).into());
+                                    }
+                                    // Left doesn't determine result, propagate right error
+                                    return Err(right_error);
+                                }
+                                (Err(left_error), Err(_)) => {
+                                    // Both errored, propagate left error
+                                    return Err(left_error);
                                 }
                             }
                         }
                         operators::LOGICAL_AND => {
-                            // CEL semantics for &&:
-                            // If left is false, return false (short-circuit)
-                            // If left errors, evaluate right - if right is false, return false; otherwise return error
-                            match Value::resolve(&call.args[0], ctx) {
-                                Ok(left) => {
-                                    if !left.to_bool().unwrap_or(false) {
-                                        // Left is false, short-circuit to false
+                            // CEL AND semantics: result is false if either side is false (bool)
+                            // Type errors can be short-circuited if the other side determines the result
+                            let left_result = Value::resolve(&call.args[0], ctx);
+                            let right_result = Value::resolve(&call.args[1], ctx);
+
+                            match (left_result, right_result) {
+                                (Ok(left), Ok(right)) => {
+                                    // If either side is Bool(false), return false
+                                    if matches!(left, Value::Bool(false)) {
                                         return Ok(Value::Bool(false).into());
                                     }
-                                    // Left is true, evaluate right
-                                    match Value::resolve(&call.args[1], ctx) {
-                                        Ok(right) => return Ok(Value::Bool(right.to_bool().unwrap_or(false)).into()),
-                                        Err(right_error) => return Err(right_error), // Propagate right side errors
+                                    if matches!(right, Value::Bool(false)) {
+                                        return Ok(Value::Bool(false).into());
                                     }
+                                    // If both are Bool(true), return true
+                                    if matches!(left, Value::Bool(true)) && matches!(right, Value::Bool(true)) {
+                                        return Ok(Value::Bool(true).into());
+                                    }
+                                    // One or both sides are non-bool and neither is false
+                                    return Err(ExecutionError::NoSuchOverload);
                                 }
-                                Err(left_error) => {
-                                    // Left errored, check if right can determine the result
-                                    match Value::resolve(&call.args[1], ctx) {
-                                        Ok(right) => {
-                                            if !right.to_bool().unwrap_or(false) {
-                                                // Right is false, return false (error is masked)
-                                                return Ok(Value::Bool(false).into());
-                                            }
-                                            // Right is true, propagate left error
-                                            return Err(left_error);
-                                        }
-                                        Err(_) => {
-                                            // Both sides errored, propagate left error
-                                            return Err(left_error);
-                                        }
+                                (Err(left_error), Ok(right)) => {
+                                    // Left errored, check if right can determine result
+                                    if matches!(right, Value::Bool(false)) {
+                                        return Ok(Value::Bool(false).into());
                                     }
+                                    // Right doesn't determine result, propagate left error
+                                    return Err(left_error);
+                                }
+                                (Ok(left), Err(right_error)) => {
+                                    // Right errored, check if left can determine result
+                                    if matches!(left, Value::Bool(false)) {
+                                        return Ok(Value::Bool(false).into());
+                                    }
+                                    // Left doesn't determine result, propagate right error
+                                    return Err(right_error);
+                                }
+                                (Err(left_error), Err(_)) => {
+                                    // Both errored, propagate left error
+                                    return Err(left_error);
                                 }
                             }
                         }
@@ -1042,6 +1297,7 @@ impl Value {
                             }
 
                             let result = match (value, idx) {
+                                // CEL allows Int and UInt for list indices
                                 (Value::List(items), Value::Int(idx)) => {
                                     if idx >= 0 && (idx as usize) < items.len() {
                                         items[idx as usize].clone().into()
@@ -1054,6 +1310,19 @@ impl Value {
                                         items[idx as usize].clone().into()
                                     } else {
                                         Err(ExecutionError::IndexOutOfBounds(idx.into()))
+                                    }
+                                }
+                                (Value::List(items), Value::Float(idx)) => {
+                                    // Allow float indices if they're whole numbers
+                                    if idx.fract() == 0.0 && idx >= 0.0 {
+                                        let idx_i64 = idx as i64;
+                                        if (idx_i64 as usize) < items.len() {
+                                            items[idx_i64 as usize].clone().into()
+                                        } else {
+                                            Err(ExecutionError::IndexOutOfBounds(idx_i64.into()))
+                                        }
+                                    } else {
+                                        Err(ExecutionError::NoSuchOverload)
                                     }
                                 }
                                 (Value::String(_), Value::Int(idx)) => {
@@ -1108,17 +1377,18 @@ impl Value {
                                         Err(ExecutionError::NoSuchKey(property.to_string().into()))
                                     }
                                 }
-                                (Value::Struct(_), index) => {
-                                    Err(ExecutionError::UnsupportedMapIndex(index))
+                                // CEL does not support other types as struct/map keys or list indices
+                                (Value::Struct(_), _) => {
+                                    Err(ExecutionError::NoSuchOverload)
                                 }
-                                (Value::Map(_), index) => {
-                                    Err(ExecutionError::UnsupportedMapIndex(index))
+                                (Value::Map(_), _) => {
+                                    Err(ExecutionError::NoSuchOverload)
                                 }
-                                (Value::List(_), index) => {
-                                    Err(ExecutionError::UnsupportedListIndex(index))
+                                (Value::List(_), _) => {
+                                    Err(ExecutionError::NoSuchOverload)
                                 }
-                                (value, index) => {
-                                    Err(ExecutionError::UnsupportedIndex(value, index))
+                                (_, _) => {
+                                    Err(ExecutionError::NoSuchOverload)
                                 }
                             };
 
@@ -1194,7 +1464,12 @@ impl Value {
                     match call.func_name.as_str() {
                         operators::LOGICAL_NOT => {
                             let expr = Value::resolve(&call.args[0], ctx)?;
-                            return Ok(Value::Bool(!expr.to_bool()?));
+                            // CEL requires strict boolean type for NOT operator
+                            let bool_val = match expr {
+                                Value::Bool(b) => b,
+                                _ => return Err(ExecutionError::NoSuchOverload),
+                            };
+                            return Ok(Value::Bool(!bool_val));
                         }
                         operators::NEGATE => {
                             return match Value::resolve(&call.args[0], ctx)? {
@@ -1211,9 +1486,10 @@ impl Value {
                                     }
                                 }
                                 Value::Float(f) => Ok(Value::Float(-f)),
-                                value => {
-                                    Err(ExecutionError::UnsupportedUnaryOperator("minus", value))
-                                }
+                                // CEL explicitly does not support negating unsigned integers
+                                Value::UInt(_) => Err(ExecutionError::NoSuchOverload),
+                                // All other types are not supported
+                                _ => Err(ExecutionError::NoSuchOverload),
                             };
                         }
                         operators::NOT_STRICTLY_FALSE => {
@@ -1266,9 +1542,52 @@ impl Value {
                     }
                 }
             }
-            Expr::Ident(name) => ctx.get_variable(name),
+            Expr::Ident(name) => {
+                // Try exact match first
+                match ctx.get_variable(name) {
+                    Ok(value) => Ok(value),
+                    Err(_) if name.contains('.') => {
+                        // If the identifier contains dots and wasn't found as-is,
+                        // try longest-prefix matching: progressively try shorter prefixes
+                        // Example: for "a.b.c", try "a.b" then "a", selecting remaining fields
+                        let parts: Vec<&str> = name.split('.').collect();
+
+                        // Try progressively shorter prefixes (longest first)
+                        for i in (1..parts.len()).rev() {
+                            let prefix = parts[..i].join(".");
+                            if let Ok(mut value) = ctx.get_variable(&prefix) {
+                                // Found a prefix - now perform field selections for remaining parts
+                                for &field_name in &parts[i..] {
+                                    value = value.member(field_name)?;
+                                }
+                                return Ok(value);
+                            }
+                        }
+
+                        // No prefix found, return original error
+                        Err(ExecutionError::UndeclaredReference(name.clone().into()))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             Expr::Select(select) => {
-                let left = Value::resolve(select.operand.deref(), ctx)?;
+                // Try to resolve the operand normally
+                let left_result = Value::resolve(select.operand.deref(), ctx);
+
+                // If operand resolution failed with UndeclaredReference, try qualified lookup
+                let left = match left_result {
+                    Err(ExecutionError::UndeclaredReference(_)) => {
+                        // Try qualified identifier resolution
+                        if let Some(value) = Value::try_qualified_lookup(select.operand.deref(), &select.field, ctx)? {
+                            return Ok(value);
+                        }
+                        // If qualified lookup didn't work, propagate the original error
+                        left_result?
+                    }
+                    Ok(val) => val,
+                    Err(e) => return Err(e),
+                };
+
                 if select.test {
                     // Handle OptionalValue for has() checks
                     let value_to_check = if let Ok(opt_val) = <&OptionalValue>::try_from(&left) {
@@ -1387,13 +1706,32 @@ impl Value {
                             }
                         } else {
                             // 2-parameter form: iterate with value only
+                            let mut last_error = None;
                             for item in items.deref() {
                                 if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                                    // Loop condition is false, stop iterating
+                                    // If we stopped because @result is strictly false, don't propagate errors
+                                    last_error = None;
                                     break;
                                 }
                                 ctx.add_variable_from_value(&comprehension.iter_var, item.clone());
-                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
-                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+
+                                // Try to resolve the loop step, catching errors for short-circuit semantics
+                                match Value::resolve(&comprehension.loop_step, &ctx) {
+                                    Ok(accu) => {
+                                        ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                        last_error = None; // Clear any previous error
+                                    }
+                                    Err(e) => {
+                                        // Store the error but continue - we might find a false value later
+                                        last_error = Some(e);
+                                        // Don't update @result, keep the previous value
+                                    }
+                                }
+                            }
+                            // If we exited the loop with an error and didn't find a false, propagate it
+                            if let Some(err) = last_error {
+                                return Err(err);
                             }
                         }
                     }
@@ -1488,13 +1826,17 @@ impl Value {
     fn member(self, name: &str) -> ResolveResult {
         // Handle OptionalValue - unwrap it first, then access the member
         // If the OptionalValue contains None, return optional.none()
-        // If the OptionalValue contains Some(value) but member access fails, propagate the error
-        // This ensures field access errors are not swallowed by optional chaining
+        // If the OptionalValue contains Some(value) but member access fails with NoSuchKey,
+        // return optional.none() (this is CEL's optional chaining semantics)
         if let Ok(opt_val) = <&OptionalValue>::try_from(&self) {
             return match opt_val.value() {
                 Some(inner) => match inner.clone().member(name) {
                     Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
-                    Err(e) => Err(e), // Propagate field access errors instead of converting to none
+                    Err(ExecutionError::NoSuchKey(_)) => {
+                        // Missing field on optional value returns optional.none()
+                        Ok(Value::Opaque(Arc::new(OptionalValue::none())))
+                    }
+                    Err(e) => Err(e), // Propagate other errors (type errors, etc.)
                 },
                 None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
             };
@@ -1654,9 +1996,8 @@ impl ops::Add<Value> for Value {
                 .checked_add_signed(l)
                 .ok_or(ExecutionError::Overflow("add", l.into(), r.into()))
                 .map(Value::Timestamp),
-            (left, right) => Err(ExecutionError::UnsupportedBinaryOperator(
-                "add", left, right,
-            )),
+            // CEL does not support addition for other type combinations
+            _ => Err(ExecutionError::NoSuchOverload),
         }
     }
 }
@@ -1758,9 +2099,8 @@ impl ops::Mul<Value> for Value {
 
             (Value::Float(l), Value::Float(r)) => Value::Float(l * r).into(),
 
-            (left, right) => Err(ExecutionError::UnsupportedBinaryOperator(
-                "mul", left, right,
-            )),
+            // CEL only supports multiplication for numeric types (Int, UInt, Float)
+            _ => Err(ExecutionError::NoSuchOverload),
         }
     }
 }
@@ -1786,9 +2126,11 @@ impl ops::Rem<Value> for Value {
                 .ok_or(ExecutionError::RemainderByZero(l.into()))
                 .map(Value::UInt),
 
-            (left, right) => Err(ExecutionError::UnsupportedBinaryOperator(
-                "rem", left, right,
-            )),
+            // CEL does not support modulo on Double or mixed types
+            (Value::Float(_), _) | (_, Value::Float(_)) => Err(ExecutionError::NoSuchOverload),
+
+            // All other type combinations are not supported
+            _ => Err(ExecutionError::NoSuchOverload),
         }
     }
 }

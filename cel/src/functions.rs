@@ -1,3 +1,4 @@
+use crate::common::ast::Expr;
 use crate::context::Context;
 use crate::magic::{Arguments, This};
 use crate::objects::{OptionalValue, Value};
@@ -847,22 +848,80 @@ pub fn exists_func(ftx: &FunctionContext, This(this): This<Value>) -> Result<Val
 }
 
 /// All function for lists - checks if all elements match the condition.
-/// This is a more intelligent fallback.
+/// Supports both parameterless form (checks if all elements are truthy)
+/// and predicate form (evaluates predicate for each element).
 pub fn all_func(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     match this {
         Value::List(list) => {
-            // Check if all elements are truthy
-            let all_truthy = list.iter().all(|v| match v {
-                Value::Bool(b) => *b,
-                Value::Int(i) => *i != 0,
-                Value::UInt(u) => *u != 0,
-                Value::Float(f) => *f != 0.0,
-                Value::String(s) => !s.is_empty(),
-                Value::List(l) => !l.is_empty(),
-                Value::Map(m) => !m.map.is_empty(),
-                _ => false,
-            });
-            Ok(Value::Bool(all_truthy))
+            let args = ftx.args;
+
+            // Two forms:
+            // 0 args: check if all elements are truthy
+            // 2 args: (var, predicate) - evaluate predicate for each element
+            if args.is_empty() {
+                // Check if all elements are truthy
+                let all_truthy = list.iter().all(|v| match v {
+                    Value::Bool(b) => *b,
+                    Value::Int(i) => *i != 0,
+                    Value::UInt(u) => *u != 0,
+                    Value::Float(f) => *f != 0.0,
+                    Value::String(s) => !s.is_empty(),
+                    Value::List(l) => !l.is_empty(),
+                    Value::Map(m) => !m.map.is_empty(),
+                    _ => false,
+                });
+                Ok(Value::Bool(all_truthy))
+            } else if args.len() == 2 {
+                // Extract variable name and predicate
+                let var_name = match &args[0].expr {
+                    Expr::Ident(name) => name.as_str(),
+                    _ => return Err(ftx.error("First argument to all() must be an identifier")),
+                };
+                let predicate = &args[1];
+
+                // Evaluate predicate for each element with short-circuit on first false
+                // BUT: collect errors and only fail if we never find a false
+                let mut found_false = false;
+                let mut last_error = None;
+
+                for value in list.iter() {
+                    // Create inner context with loop variable
+                    let mut inner_ctx = ftx.ptx.new_inner_scope();
+                    inner_ctx.add_variable_from_value(var_name, value.clone());
+
+                    // Evaluate predicate
+                    match Value::resolve(predicate, &inner_ctx) {
+                        Ok(Value::Bool(false)) => {
+                            // Found a false value - short-circuit and return false
+                            found_false = true;
+                            break;
+                        }
+                        Ok(Value::Bool(true)) => {
+                            // Continue checking
+                        }
+                        Ok(v) => {
+                            return Err(ftx.error(format!("Predicate must return boolean, got {:?}", v)));
+                        }
+                        Err(e) => {
+                            // Store the error but continue - we might find a false later
+                            last_error = Some(e);
+                        }
+                    }
+                }
+
+                // If we found a false, return false (short-circuit successful)
+                if found_false {
+                    Ok(Value::Bool(false))
+                } else if let Some(err) = last_error {
+                    // All non-error results were true, but we had an error, so propagate it
+                    Err(err)
+                } else {
+                    // All results were true
+                    Ok(Value::Bool(true))
+                }
+            } else {
+                Err(ftx.error(format!("all() expects 0 or 2 arguments, got {}", args.len())))
+            }
         }
         Value::Map(map) => {
             let all_truthy = map.map.values().all(|v| match v {
@@ -914,9 +973,52 @@ pub fn exists_one_func(ftx: &FunctionContext, This(this): This<Value>) -> Result
 pub fn transform_list(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     match this {
         Value::List(list) => {
-            // For now, just return the list unchanged
-            // Real implementation would need to handle transformation parameters
-            Ok(Value::List(list))
+            let args = ftx.args;
+
+            // transformList has two forms:
+            // 3 args: (index_var, value_var, transform_expr)
+            // 4 args: (index_var, value_var, filter_expr, transform_expr)
+            let (filter_expr, transform_expr) = match args.len() {
+                3 => (None, &args[2]),
+                4 => (Some(&args[2]), &args[3]),
+                _ => return Err(ftx.error(format!("transformList expects 3 or 4 arguments, got {}", args.len()))),
+            };
+
+            // Extract variable names from first two arguments (should be identifiers)
+            let index_var = match &args[0].expr {
+                Expr::Ident(name) => name.as_str(),
+                _ => return Err(ftx.error("First argument to transformList must be an identifier")),
+            };
+            let value_var = match &args[1].expr {
+                Expr::Ident(name) => name.as_str(),
+                _ => return Err(ftx.error("Second argument to transformList must be an identifier")),
+            };
+
+            let mut result = Vec::new();
+            for (idx, value) in list.iter().enumerate() {
+                // Create a new context scope with the loop variables
+                let mut inner_ctx = ftx.ptx.new_inner_scope();
+                inner_ctx.add_variable_from_value(index_var, Value::Int(idx as i64));
+                inner_ctx.add_variable_from_value(value_var, value.clone());
+
+                // Evaluate filter if present
+                if let Some(filter) = filter_expr {
+                    let filter_result = Value::resolve(filter, &inner_ctx)?;
+                    let passes = match filter_result {
+                        Value::Bool(b) => b,
+                        _ => return Err(ftx.error("Filter expression must evaluate to a boolean")),
+                    };
+                    if !passes {
+                        continue; // Skip this element
+                    }
+                }
+
+                // Evaluate transform expression
+                let transformed = Value::resolve(transform_expr, &inner_ctx)?;
+                result.push(transformed);
+            }
+
+            Ok(Value::List(result.into()))
         }
         v => Err(ftx.error(format!("transformList not supported for {v:?}"))),
     }
@@ -927,9 +1029,59 @@ pub fn transform_list(ftx: &FunctionContext, This(this): This<Value>) -> Result<
 pub fn transform_map(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     match this {
         Value::Map(map) => {
-            // For now, just return the map unchanged
-            // Real implementation would need to handle transformation parameters
-            Ok(Value::Map(map))
+            let args = ftx.args;
+
+            // transformMap has two forms:
+            // 3 args: (key_var, value_var, transform_expr)
+            // 4 args: (key_var, value_var, filter_expr, transform_expr)
+            let (filter_expr, transform_expr) = match args.len() {
+                3 => (None, &args[2]),
+                4 => (Some(&args[2]), &args[3]),
+                _ => return Err(ftx.error(format!("transformMap expects 3 or 4 arguments, got {}", args.len()))),
+            };
+
+            // Extract variable names from first two arguments (should be identifiers)
+            let key_var = match &args[0].expr {
+                Expr::Ident(name) => name.as_str(),
+                _ => return Err(ftx.error("First argument to transformMap must be an identifier")),
+            };
+            let value_var = match &args[1].expr {
+                Expr::Ident(name) => name.as_str(),
+                _ => return Err(ftx.error("Second argument to transformMap must be an identifier")),
+            };
+
+            let mut result = std::collections::HashMap::new();
+            for (key, value) in map.map.iter() {
+                // Create a new context scope with the loop variables
+                let mut inner_ctx = ftx.ptx.new_inner_scope();
+                // Convert key to appropriate value
+                let key_value = match key {
+                    crate::objects::Key::Int(i) => Value::Int(*i),
+                    crate::objects::Key::Uint(u) => Value::UInt(*u),
+                    crate::objects::Key::Bool(b) => Value::Bool(*b),
+                    crate::objects::Key::String(s) => Value::String(s.clone()),
+                };
+                inner_ctx.add_variable_from_value(key_var, key_value.clone());
+                inner_ctx.add_variable_from_value(value_var, value.clone());
+
+                // Evaluate filter if present
+                if let Some(filter) = filter_expr {
+                    let filter_result = Value::resolve(filter, &inner_ctx)?;
+                    let passes = match filter_result {
+                        Value::Bool(b) => b,
+                        _ => return Err(ftx.error("Filter expression must evaluate to a boolean")),
+                    };
+                    if !passes {
+                        continue; // Skip this entry
+                    }
+                }
+
+                // Evaluate transform expression
+                let transformed = Value::resolve(transform_expr, &inner_ctx)?;
+                result.insert(key.clone(), transformed);
+            }
+
+            Ok(Value::Map(crate::objects::Map { map: result.into() }))
         }
         v => Err(ftx.error(format!("transformMap not supported for {v:?}"))),
     }

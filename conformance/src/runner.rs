@@ -1,6 +1,7 @@
-use cel::context::Context;
+use cel::context::{Context, VariableResolver};
 use cel::objects::Value as CelValue;
 use cel::Program;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -10,6 +11,28 @@ use crate::proto::cel::expr::conformance::test::{
 };
 use crate::textproto::parse_textproto_to_prost;
 use crate::value_converter::proto_value_to_cel_value;
+
+/// Container-aware variable resolver that tries prefixed names first
+struct ContainerResolver {
+    container: String,
+    variables: BTreeMap<String, CelValue>,
+}
+
+impl VariableResolver for ContainerResolver {
+    fn resolve(&self, variable: &str) -> Option<CelValue> {
+        // If container is non-empty and the variable name doesn't contain a dot,
+        // try the prefixed version first
+        if !self.container.is_empty() && !variable.contains('.') {
+            let prefixed = format!("{}.{}", self.container, variable);
+            if let Some(value) = self.variables.get(&prefixed) {
+                return Some(value.clone());
+            }
+        }
+
+        // Fall back to exact match
+        self.variables.get(variable).cloned()
+    }
+}
 
 pub struct ConformanceRunner {
     test_data_dir: PathBuf,
@@ -157,6 +180,12 @@ impl ConformanceRunner {
 
         // Build context with bindings
         let mut context = Context::default();
+
+        // Prepare container resolver if needed (must be declared outside the block to live long enough)
+        let mut variables_map = BTreeMap::new();
+        let container = test.container.clone();
+        let use_resolver = !container.is_empty() && !test.bindings.is_empty();
+
         if !test.bindings.is_empty() {
             for (key, expr_value) in &test.bindings {
                 // Extract Value from ExprValue
@@ -172,7 +201,13 @@ impl ConformanceRunner {
 
                 match proto_value_to_cel_value(proto_value) {
                     Ok(cel_value) => {
-                        context.add_variable(key, cel_value);
+                        if use_resolver {
+                            // Store in map for resolver
+                            variables_map.insert(key.clone(), cel_value);
+                        } else {
+                            // Add directly to context
+                            context.add_variable(key, cel_value);
+                        }
                     }
                     Err(e) => {
                         return TestResult::Failed {
@@ -182,6 +217,21 @@ impl ConformanceRunner {
                     }
                 }
             }
+        }
+
+        // Create resolver outside the bindings block so it lives long enough
+        let resolver = if use_resolver {
+            Some(ContainerResolver {
+                container,
+                variables: variables_map,
+            })
+        } else {
+            None
+        };
+
+        // Set the resolver if we have one
+        if let Some(ref resolver) = resolver {
+            context.set_variable_resolver(resolver);
         }
 
         // Execute the program - catch panics
