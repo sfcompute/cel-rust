@@ -65,7 +65,7 @@ pub enum ExecutionError {
     NoSuchKey(Arc<String>),
     /// Indicates that the script used an existing operator or function with
     /// values of one or more types for which no overload was declared.
-    #[error("No such overload")]
+    #[error("no_such_overload")]
     NoSuchOverload,
     /// Indicates that the script attempted to reference an undeclared variable
     /// method, or function.

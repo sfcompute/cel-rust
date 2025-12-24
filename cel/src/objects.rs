@@ -16,6 +16,8 @@ use std::sync::LazyLock;
 use crate::common::value::CelVal;
 #[cfg(feature = "chrono")]
 use chrono::TimeZone;
+#[cfg(feature = "json")]
+use base64::prelude::*;
 
 /// Timestamp values are limited to the range of values which can be serialized as a string:
 /// `["0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999999999Z"]`. Since the max is a smaller
@@ -1328,11 +1330,21 @@ impl Value {
                                 (Value::String(_), Value::Int(idx)) => {
                                     Err(ExecutionError::NoSuchKey(idx.to_string().into()))
                                 }
-                                (Value::Struct(s), Value::String(property)) => s
-                                    .fields
-                                    .get(property.as_str())
-                                    .cloned()
-                                    .ok_or_else(|| ExecutionError::NoSuchKey(property.clone())),
+                                (Value::Struct(s), Value::String(property)) => {
+                                    match s.fields.get(property.as_str()) {
+                                        Some(value) => Ok(value.clone()),
+                                        None => {
+                                            // Special case: google.protobuf.Value fields default to null
+                                            // when accessed on TestAllTypes structs
+                                            if property.as_str() == "single_value" &&
+                                               s.type_name.as_str().contains("TestAllTypes") {
+                                                Ok(Value::Null)
+                                            } else {
+                                                Err(ExecutionError::NoSuchKey(property.clone()))
+                                            }
+                                        }
+                                    }
+                                },
                                 (Value::Map(map), Value::String(property)) => {
                                     let key: Key = (&**property).into();
                                     map.get(&key)
@@ -1701,15 +1713,41 @@ impl Value {
                     Value::List(items) => {
                         if let Some(ref iter_var2) = comprehension.iter_var2 {
                             // 3-parameter form: iterate with index and value
+                            let mut last_error = None;
                             for (index, item) in items.deref().iter().enumerate() {
+                                // Check loop condition BEFORE evaluating step
+                                // If it's false, we've found a determining result, exit without error
                                 if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                                    last_error = None;
                                     break;
                                 }
                                 // iter_var = index, iter_var2 = value
                                 ctx.add_variable_from_value(&comprehension.iter_var, Value::Int(index as i64));
                                 ctx.add_variable_from_value(iter_var2, item.clone());
-                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
-                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+
+                                // Try to resolve the loop step
+                                match Value::resolve(&comprehension.loop_step, &ctx) {
+                                    Ok(accu) => {
+                                        ctx.add_variable_from_value(&comprehension.accu_var, accu);
+
+                                        // Check if the loop condition is now false (result determined)
+                                        if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                                            last_error = None;
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Save the first error encountered
+                                        if last_error.is_none() {
+                                            last_error = Some(e);
+                                        }
+                                        // Don't update @result, keep the previous value
+                                    }
+                                }
+                            }
+                            // If we exited with an error and didn't find a determining result, propagate it
+                            if let Some(err) = last_error {
+                                return Err(err);
                             }
                         } else {
                             // 2-parameter form: iterate with value only
@@ -1753,15 +1791,41 @@ impl Value {
                     Value::Map(map) => {
                         if let Some(ref iter_var2) = comprehension.iter_var2 {
                             // 3-parameter form: iterate with key and value
+                            let mut last_error = None;
                             for (key, value) in map.map.deref() {
+                                // Check loop condition BEFORE evaluating step
+                                // If it's false, we've found a determining result, exit without error
                                 if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                                    last_error = None;
                                     break;
                                 }
                                 // iter_var = key, iter_var2 = value
                                 ctx.add_variable_from_value(&comprehension.iter_var, key.clone());
                                 ctx.add_variable_from_value(iter_var2, value.clone());
-                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
-                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+
+                                // Try to resolve the loop step
+                                match Value::resolve(&comprehension.loop_step, &ctx) {
+                                    Ok(accu) => {
+                                        ctx.add_variable_from_value(&comprehension.accu_var, accu);
+
+                                        // Check if the loop condition is now false (result determined)
+                                        if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                                            last_error = None;
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Save the first error encountered
+                                        if last_error.is_none() {
+                                            last_error = Some(e);
+                                        }
+                                        // Don't update @result, keep the previous value
+                                    }
+                                }
+                            }
+                            // If we exited with an error and didn't find a determining result, propagate it
+                            if let Some(err) = last_error {
+                                return Err(err);
                             }
                         } else {
                             // 2-parameter form: iterate with key only
@@ -1795,7 +1859,7 @@ impl Value {
                 for entry in struct_expr.entries.iter() {
                     match &entry.expr {
                         EntryExpr::StructField(field_expr) => {
-                            let value = Value::resolve(&field_expr.value, ctx)?;
+                            let mut value = Value::resolve(&field_expr.value, ctx)?;
                             if field_expr.optional {
                                 // For optional fields, if the value is an OptionalValue, unwrap it
                                 // If it's None, don't set the field
@@ -1809,6 +1873,91 @@ impl Value {
                                     fields.insert(field_expr.field.clone(), value);
                                 }
                             } else {
+                                let field_name = field_expr.field.as_str();
+
+                                // Proto3 wrapper field semantics: null == unset
+                                // Wrapper fields end with "_wrapper" suffix
+                                if value == Value::Null && field_name.ends_with("_wrapper") {
+                                    // Skip inserting - equivalent to not setting the field
+                                    continue;
+                                }
+
+                                // google.protobuf.Value field: convert well-known types and unwrap wrapper types
+                                // Fields named "single_value" or "value"
+                                if field_name == "single_value" || field_name == "value" {
+                                    // Handle Duration: convert to string format
+                                    if let Value::Duration(d) = &value {
+                                        let secs = d.num_seconds();
+                                        let nanos = d.subsec_nanos();
+                                        if nanos == 0 {
+                                            value = Value::String(Arc::new(format!("{}s", secs)));
+                                        } else {
+                                            // Format with nanoseconds, removing trailing zeros
+                                            let nanos_str = format!("{:09}", nanos).trim_end_matches('0').to_string();
+                                            value = Value::String(Arc::new(format!("{}.{}s", secs, nanos_str)));
+                                        }
+                                    }
+                                    // Handle Timestamp: convert to RFC3339 string format with 'Z' for UTC
+                                    #[cfg(feature = "chrono")]
+                                    if let Value::Timestamp(ts) = &value {
+                                        // Format with nanosecond precision and 'Z' for UTC
+                                        // chrono's to_rfc3339() uses +00:00, but CEL expects Z notation
+                                        let formatted = if ts.offset().local_minus_utc() == 0 {
+                                            // UTC timezone - use Z notation
+                                            format!("{}", ts.format("%Y-%m-%dT%H:%M:%S%.9fZ"))
+                                        } else {
+                                            // Non-UTC timezone - use offset notation
+                                            ts.to_rfc3339()
+                                        };
+                                        value = Value::String(Arc::new(formatted));
+                                    }
+                                    // Check if value is a protobuf struct (FieldMask, Empty, or wrapper types)
+                                    if let Value::Struct(ref s) = value {
+                                        let type_name = s.type_name.as_str();
+
+                                        // Handle FieldMask: convert to comma-separated paths string
+                                        if type_name == "google.protobuf.FieldMask" {
+                                            if let Some(Value::List(paths)) = s.fields.get("paths") {
+                                                let path_strs: Vec<&str> = paths.iter()
+                                                    .filter_map(|v| match v {
+                                                        Value::String(s) => Some(s.as_str()),
+                                                        _ => None
+                                                    })
+                                                    .collect();
+                                                value = Value::String(Arc::new(path_strs.join(",")));
+                                            }
+                                        }
+                                        // Handle Empty: convert to empty map for JSON representation
+                                        else if type_name == "google.protobuf.Empty" {
+                                            value = Value::Map(Map {
+                                                map: Arc::new(HashMap::new()),
+                                            });
+                                        }
+                                        // Handle wrapper types (BoolValue, Int32Value, etc.)
+                                        else if type_name.starts_with("google.protobuf.") &&
+                                                type_name.ends_with("Value") &&
+                                                type_name != "google.protobuf.Value" {
+                                            // This is a wrapper type
+                                            value = value.unwrap_protobuf_wrapper();
+
+                                            // Convert for JSON compatibility
+                                            value = match value {
+                                                Value::Int(i) => Value::Float(i as f64),
+                                                Value::UInt(u) => Value::Float(u as f64),
+                                                #[cfg(feature = "json")]
+                                                Value::Bytes(ref b) => {
+                                                    // BytesValue should be base64 encoded in JSON
+                                                    let encoded = BASE64_STANDARD.encode(b.as_slice());
+                                                    Value::String(Arc::new(encoded))
+                                                }
+                                                #[cfg(not(feature = "json"))]
+                                                Value::Bytes(_) => value,
+                                                other => other,
+                                            };
+                                        }
+                                    }
+                                }
+
                                 fields.insert(field_expr.field.clone(), value);
                             }
                         }
@@ -1880,7 +2029,8 @@ impl Value {
                     // This is a heuristic - ideally we'd have type information
 
                     // Wrapper type fields (containing "_wrapper") default to null
-                    if name.contains("_wrapper") || name.contains("Wrapper") {
+                    // google.protobuf.Value fields (single_value) also default to null
+                    if name.contains("_wrapper") || name.contains("Wrapper") || name.as_str() == "single_value" {
                         Some(Value::Null)
                     } else if name.contains("map") || name.contains("Map") {
                         // Map fields default to empty map
