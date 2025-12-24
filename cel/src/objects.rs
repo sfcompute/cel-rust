@@ -1571,14 +1571,21 @@ impl Value {
                 }
             }
             Expr::Select(select) => {
+                // Strip backticks from field name if present (for quoted field access like m.`/api/v1`)
+                let field = if select.field.starts_with('`') && select.field.ends_with('`') {
+                    &select.field[1..select.field.len() - 1]
+                } else {
+                    &select.field
+                };
+
                 // Try to resolve the operand normally
                 let left_result = Value::resolve(select.operand.deref(), ctx);
 
                 // If operand resolution failed with UndeclaredReference, try qualified lookup
                 let left = match left_result {
                     Err(ExecutionError::UndeclaredReference(_)) => {
-                        // Try qualified identifier resolution
-                        if let Some(value) = Value::try_qualified_lookup(select.operand.deref(), &select.field, ctx)? {
+                        // Try qualified identifier resolution (use original field for this)
+                        if let Some(value) = Value::try_qualified_lookup(select.operand.deref(), field, ctx)? {
                             return Ok(value);
                         }
                         // If qualified lookup didn't work, propagate the original error
@@ -1601,17 +1608,17 @@ impl Value {
                     match value_to_check {
                         Value::Map(map) => {
                             for key in map.map.deref().keys() {
-                                if key.to_string().eq(&select.field) {
+                                if key.to_string().eq(field) {
                                     return Ok(Value::Bool(true));
                                 }
                             }
                             Ok(Value::Bool(false))
                         }
-                        Value::Struct(s) => Ok(Value::Bool(s.fields.contains_key(&select.field))),
+                        Value::Struct(s) => Ok(Value::Bool(s.fields.contains_key(field))),
                         _ => Ok(Value::Bool(false)),
                     }
                 } else {
-                    left.member(&select.field)
+                    left.member(field)
                 }
             }
             Expr::List(list_expr) => {
@@ -1826,18 +1833,24 @@ impl Value {
     fn member(self, name: &str) -> ResolveResult {
         // Handle OptionalValue - unwrap it first, then access the member
         // If the OptionalValue contains None, return optional.none()
-        // If the OptionalValue contains Some(value) but member access fails with NoSuchKey,
-        // return optional.none() (this is CEL's optional chaining semantics)
+        // If the OptionalValue contains Some(value):
+        //   - For Map/Struct: missing field returns optional.none() (CEL's optional chaining semantics)
+        //   - For other types (scalars, null, etc.): field access errors as expected
         if let Ok(opt_val) = <&OptionalValue>::try_from(&self) {
             return match opt_val.value() {
-                Some(inner) => match inner.clone().member(name) {
-                    Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
-                    Err(ExecutionError::NoSuchKey(_)) => {
-                        // Missing field on optional value returns optional.none()
-                        Ok(Value::Opaque(Arc::new(OptionalValue::none())))
+                Some(inner) => {
+                    // Check if the inner value supports field access
+                    let can_have_fields = matches!(inner, Value::Map(_) | Value::Struct(_));
+
+                    match inner.clone().member(name) {
+                        Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
+                        Err(ExecutionError::NoSuchKey(_)) if can_have_fields => {
+                            // Missing field on Map/Struct in optional value returns optional.none()
+                            Ok(Value::Opaque(Arc::new(OptionalValue::none())))
+                        }
+                        Err(e) => Err(e), // Propagate errors (including NoSuchKey on non-map/struct types)
                     }
-                    Err(e) => Err(e), // Propagate other errors (type errors, etc.)
-                },
+                }
                 None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
             };
         }
