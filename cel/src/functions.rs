@@ -267,7 +267,16 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             .map(Value::Int)
             .map_err(|e| ftx.error(format!("string parse error: {e}")))?,
         Value::Float(v) => {
-            if v > i64::MAX as f64 || v < i64::MIN as f64 {
+            // Check if the float is NaN or infinite
+            if v.is_nan() || v.is_infinite() {
+                return Err(ftx.error("cannot convert NaN or infinity to int"));
+            }
+            // Check if the float is within the valid range for i64
+            // Note: Both i64::MAX and i64::MIN when represented as f64 are outside the exact range
+            // i64::MAX as f64 = 9223372036854775808.0 (2^63)
+            // i64::MIN as f64 = -9223372036854775808.0 (-2^63)
+            // Both round to values that can't be represented exactly as i64
+            if v >= 9223372036854775808.0 || v <= -9223372036854775808.0 {
                 return Err(ftx.error("integer overflow"));
             }
             Value::Int(v as i64)
@@ -534,8 +543,13 @@ pub fn char_at(ftx: &FunctionContext, This(this): This<Arc<String>>, index: i64)
     let chars: Vec<char> = this.chars().collect();
     let idx = index as usize;
 
-    if idx >= chars.len() {
-        // Return empty string when index is out of bounds
+    if idx > chars.len() {
+        // Error when index is beyond the string (not including exactly at the end)
+        return Err(ftx.error(format!("index out of range: {}", index)));
+    }
+
+    if idx == chars.len() {
+        // Return empty string when index is exactly at the end
         return Ok(Value::String(Arc::new(String::new())));
     }
 
@@ -554,12 +568,16 @@ pub fn index_of(ftx: &FunctionContext, This(this): This<Arc<String>>, Arguments(
     if args.is_empty() {
         return Err(ftx.error("indexOf requires at least one argument (substring)"));
     }
-    
+
+    if args.len() > 2 {
+        return Err(ftx.error("no such overload"));
+    }
+
     let substr = match &args[0] {
         Value::String(s) => s.clone(),
         _ => return Err(ftx.error("indexOf first argument must be a string")),
     };
-    
+
     let start_position = if args.len() > 1 {
         match &args[1] {
             Value::Int(i) => *i,
@@ -575,8 +593,13 @@ pub fn index_of(ftx: &FunctionContext, This(this): This<Arc<String>>, Arguments(
     
     let chars: Vec<char> = this.chars().collect();
     let start_idx = start_position as usize;
-    
-    if start_idx >= chars.len() {
+
+    if start_idx > chars.len() {
+        return Err(ftx.error(format!("index out of range: {}", start_position)));
+    }
+
+    if start_idx == chars.len() {
+        // Start position is at the end - only match empty substring
         return Ok(Value::Int(-1));
     }
     
@@ -644,9 +667,15 @@ pub fn last_index_of(ftx: &FunctionContext, This(this): This<Arc<String>>, Argum
     if start_position < 0 {
         return Err(ftx.error(format!("lastIndexOf start index {} is negative", start_position)));
     }
-    
+
     let chars: Vec<char> = this.chars().collect();
-    let start_idx = (start_position as usize).min(chars.len());
+    let start_idx_raw = start_position as usize;
+
+    if start_idx_raw > chars.len() {
+        return Err(ftx.error(format!("index out of range: {}", start_position)));
+    }
+
+    let start_idx = start_idx_raw;
 
     // To find matches that start at or before start_idx, we need to search
     // up to start_idx + substring_length
@@ -692,13 +721,15 @@ pub fn quote(This(this): This<Arc<String>>) -> Result<Value> {
             '\n' => "\\n".to_string(),
             '\r' => "\\r".to_string(),
             '\t' => "\\t".to_string(),
+            '\u{07}' => "\\a".to_string(),  // bell/alert
             '\u{08}' => "\\b".to_string(),  // backspace
             '\u{0C}' => "\\f".to_string(),  // form feed
+            '\u{0B}' => "\\v".to_string(),  // vertical tab
             c if c.is_control() => format!("\\u{{{:04X}}}", c as u32),
             c => c.to_string(),
         })
         .collect::<String>();
-    
+
     Ok(Value::String(Arc::new(format!("\"{}\"", escaped))))
 }
 
@@ -762,9 +793,12 @@ pub fn split(ftx: &FunctionContext, This(this): This<Arc<String>>, Arguments(arg
             Value::Int(i) => *i,
             _ => return Err(ftx.error("split limit must be an integer")),
         };
-        
-        let parts: Vec<Value> = if limit <= 0 {
-            // No limit or negative limit - split all
+
+        let parts: Vec<Value> = if limit == 0 {
+            // Limit of 0 means return empty list
+            vec![]
+        } else if limit < 0 {
+            // Negative limit - split all
             this.split(delimiter.as_str())
                 .map(|part| Value::String(Arc::new(part.to_string())))
                 .collect()
@@ -840,9 +874,65 @@ pub fn trim(This(this): This<Arc<String>>) -> Result<Value> {
 }
 
 /// Replaces all occurrences of a substring with another substring.
-pub fn replace(This(this): This<Arc<String>>, old: Arc<String>, new: Arc<String>) -> Result<Value> {
-    let result = this.replace(old.as_str(), new.as_str());
+pub fn replace(ftx: &FunctionContext, This(this): This<Arc<String>>, Arguments(args): Arguments) -> Result<Value> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(ftx.error("replace requires 2 or 3 arguments"));
+    }
+
+    let old = match &args[0] {
+        Value::String(s) => s.clone(),
+        _ => return Err(ftx.error("first argument must be a string")),
+    };
+
+    let new = match &args[1] {
+        Value::String(s) => s.clone(),
+        _ => return Err(ftx.error("second argument must be a string")),
+    };
+
+    let result = if args.len() == 3 {
+        // With limit parameter
+        let limit = match &args[2] {
+            Value::Int(i) if *i >= 0 => *i as usize,
+            Value::Int(i) => return Err(ftx.error(format!("limit must be non-negative, got {}", i))),
+            _ => return Err(ftx.error("third argument must be an integer")),
+        };
+
+        if limit == 0 {
+            this.as_ref().clone()
+        } else {
+            replacen(this.as_ref(), old.as_ref(), new.as_ref(), limit)
+        }
+    } else {
+        // No limit - replace all occurrences
+        this.replace(old.as_str(), new.as_str())
+    };
+
     Ok(Value::String(Arc::new(result)))
+}
+
+/// Helper function to replace at most n occurrences
+fn replacen(s: &str, old: &str, new: &str, limit: usize) -> String {
+    if old.is_empty() {
+        return s.to_string();
+    }
+
+    let mut result = String::new();
+    let mut remaining = s;
+    let mut count = 0;
+
+    while count < limit {
+        if let Some(pos) = remaining.find(old) {
+            result.push_str(&remaining[..pos]);
+            result.push_str(new);
+            remaining = &remaining[pos + old.len()..];
+            count += 1;
+        } else {
+            break;
+        }
+    }
+
+    result.push_str(remaining);
+    result
 }
 
 /// Decodes a string (simplified implementation).
@@ -1878,6 +1968,10 @@ pub fn reverse(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> 
             let mut reversed = list.as_ref().clone();
             reversed.reverse();
             Ok(Value::List(Arc::new(reversed)))
+        }
+        Value::String(s) => {
+            let reversed: String = s.chars().rev().collect();
+            Ok(Value::String(Arc::new(reversed)))
         }
         v => Err(ftx.error(format!("reverse not supported for {v:?}"))),
     }
