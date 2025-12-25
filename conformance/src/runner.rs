@@ -1,9 +1,10 @@
 use cel::context::{Context, VariableResolver};
-use cel::objects::Value as CelValue;
+use cel::objects::{Struct, Value as CelValue};
 use cel::Program;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 use crate::proto::cel::expr::conformance::test::{
@@ -231,7 +232,11 @@ impl ConformanceRunner {
                 match proto_value_to_cel_value(expected_value) {
                     Ok(expected_cel_value) => match result {
                         Ok(actual_value) => {
-                            if values_equal(&actual_value, &expected_cel_value) {
+                            // Unwrap wrapper types before comparison
+                            let actual_unwrapped = unwrap_wrapper_if_needed(actual_value.clone());
+                            let expected_unwrapped = unwrap_wrapper_if_needed(expected_cel_value.clone());
+
+                            if values_equal(&actual_unwrapped, &expected_unwrapped) {
                                 TestResult::Passed {
                                     name: test_name.clone(),
                                 }
@@ -240,7 +245,7 @@ impl ConformanceRunner {
                                     name: test_name.clone(),
                                     error: format!(
                                         "Expected {:?}, got {:?}",
-                                        expected_cel_value, actual_value
+                                        expected_unwrapped, actual_unwrapped
                                     ),
                                 }
                             }
@@ -343,7 +348,68 @@ fn values_equal(a: &CelValue, b: &CelValue) -> bool {
             }
             true
         }
+        (Struct(a), Struct(b)) => structs_equal(a, b),
+        (Timestamp(a), Timestamp(b)) => a == b,
+        (Duration(a), Duration(b)) => a == b,
         _ => false,
+    }
+}
+
+fn structs_equal(a: &Struct, b: &Struct) -> bool {
+    // Type names must match
+    if a.type_name != b.type_name {
+        return false;
+    }
+
+    // Field counts must match
+    if a.fields.len() != b.fields.len() {
+        return false;
+    }
+
+    // All fields must have equal values
+    for (key, value_a) in a.fields.iter() {
+        match b.fields.get(key) {
+            Some(value_b) => {
+                if !values_equal(value_a, value_b) {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+    }
+
+    true
+}
+
+fn unwrap_wrapper_if_needed(value: CelValue) -> CelValue {
+    match value {
+        CelValue::Struct(s) => {
+            // Check if this is a wrapper type
+            let type_name = s.type_name.as_str();
+
+            // Check if it's a Google protobuf wrapper type
+            if !type_name.starts_with("google.protobuf.") || !type_name.ends_with("Value") {
+                return CelValue::Struct(s);
+            }
+
+            // Check if the wrapper has a value field
+            if let Some(v) = s.fields.get("value") {
+                // Unwrap to the inner value
+                return v.clone();
+            }
+
+            // Empty wrapper - return default value for the type
+            match type_name {
+                "google.protobuf.Int32Value" | "google.protobuf.Int64Value" => CelValue::Int(0),
+                "google.protobuf.UInt32Value" | "google.protobuf.UInt64Value" => CelValue::UInt(0),
+                "google.protobuf.FloatValue" | "google.protobuf.DoubleValue" => CelValue::Float(0.0),
+                "google.protobuf.StringValue" => CelValue::String(Arc::new(String::new())),
+                "google.protobuf.BytesValue" => CelValue::Bytes(Arc::new(Vec::new())),
+                "google.protobuf.BoolValue" => CelValue::Bool(false),
+                _ => CelValue::Struct(s),
+            }
+        }
+        other => other,
     }
 }
 

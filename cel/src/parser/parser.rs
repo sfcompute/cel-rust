@@ -1016,7 +1016,28 @@ impl gen::CELVisitorCompat<'_> for Parser {
     fn visit_Bytes(&mut self, ctx: &BytesContext<'_>) -> Self::Return {
         if let Some(token) = ctx.tok.as_deref() {
             let string = ctx.get_text();
-            match parse::parse_bytes(&string[2..string.len() - 1]) {
+
+            // Check if this is triple-quoted (need to check before slicing off 'b')
+            // Patterns: b''' b""" br''' br""" bR''' bR"""
+            let is_triple = string.len() > 6 &&
+                            (string.starts_with("b'''") || string.starts_with("b\"\"\"") ||
+                             string.starts_with("br'''") || string.starts_with("br\"\"\"") ||
+                             string.starts_with("bR'''") || string.starts_with("bR\"\"\""));
+
+            // Check if this is a raw bytes literal (br'...' or bR'...')
+            let is_raw = string.len() > 2 && (string.chars().nth(1) == Some('r') || string.chars().nth(1) == Some('R'));
+
+            let start_index = if is_raw {
+                1  // Skip only 'b', keep 'r' and quotes for parse_bytes to detect (both br' and br''')
+            } else if is_triple {
+                4  // Skip 'b' and opening ''' for triple-quoted bytes (b''')
+            } else {
+                2  // Skip 'b' and first quote for regular bytes
+            };
+
+            let end_offset = if is_triple { 3 } else { 1 };
+
+            match parse::parse_bytes(&string[start_index..string.len() - end_offset]) {
                 Ok(bytes) => self
                     .helper
                     .next_expr(token, Expr::Literal(CelVal::Bytes(bytes))),

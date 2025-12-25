@@ -52,8 +52,9 @@ pub fn proto_value_to_cel_value(proto_value: &ProtoValue) -> Result<CelValue, Co
                 map: Arc::new(entries),
             }))
         }
-        Some(crate::proto::cel::expr::value::Kind::EnumValue(_)) => {
-            Err(ConversionError::Unsupported("enum values".to_string()))
+        Some(crate::proto::cel::expr::value::Kind::EnumValue(enum_val)) => {
+            // Enum values are represented as integers in CEL
+            Ok(Int(enum_val.value as i64))
         }
         Some(crate::proto::cel::expr::value::Kind::ObjectValue(any)) => {
             convert_any_to_cel_value(any)

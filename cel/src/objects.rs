@@ -677,10 +677,45 @@ impl From<&Value> for Value {
     }
 }
 
+fn get_wrapper_default(type_name: &str) -> Value {
+    match type_name {
+        "google.protobuf.BoolValue" => Value::Bool(false),
+        "google.protobuf.StringValue" => Value::String(Arc::new(String::new())),
+        "google.protobuf.BytesValue" => Value::Bytes(Arc::new(Vec::new())),
+        "google.protobuf.DoubleValue" => Value::Float(0.0),
+        "google.protobuf.FloatValue" => Value::Float(0.0),
+        "google.protobuf.Int64Value" => Value::Int(0),
+        "google.protobuf.UInt64Value" => Value::UInt(0),
+        "google.protobuf.Int32Value" => Value::Int(0),
+        "google.protobuf.UInt32Value" => Value::UInt(0),
+        _ => Value::Null,
+    }
+}
+
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Map(a), Value::Map(b)) => a == b,
+            // Special case: both are wrapper types - unwrap and compare values
+            (Value::Struct(a), Value::Struct(b))
+                if a.type_name.as_str().starts_with("google.protobuf.") &&
+                   a.type_name.as_str().ends_with("Value") &&
+                   b.type_name.as_str().starts_with("google.protobuf.") &&
+                   b.type_name.as_str().ends_with("Value") => {
+                // Get unwrapped values from both wrappers
+                let a_value = a.fields.get("value");
+                let b_value = b.fields.get("value");
+                match (a_value, b_value) {
+                    (Some(a_val), Some(b_val)) => a_val.eq(b_val),
+                    (None, None) => {
+                        // Both are empty wrappers - compare their default values
+                        let a_default = get_wrapper_default(&a.type_name);
+                        let b_default = get_wrapper_default(&b.type_name);
+                        a_default.eq(&b_default)
+                    }
+                    _ => false,
+                }
+            }
             (Value::Struct(a), Value::Struct(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Function(a1, a2), Value::Function(b1, b2)) => a1 == b1 && a2 == b2,
