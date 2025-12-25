@@ -36,6 +36,9 @@ mod json;
 #[cfg(feature = "json")]
 pub use json::ConvertToJsonError;
 
+#[cfg(feature = "proto")]
+mod proto_compare;
+
 use magic::FromContext;
 
 pub mod extractors {

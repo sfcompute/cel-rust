@@ -1388,10 +1388,53 @@ pub use time::timestamp;
 #[cfg(feature = "chrono")]
 pub mod time {
     use super::{FunctionContext, Result};
-    use crate::magic::This;
+    use crate::magic::{Arguments, This};
     use crate::{ExecutionError, Value};
     use chrono::{Datelike, Days, Months, Timelike};
     use std::sync::Arc;
+
+    /// Parse a timezone offset string like "+11:00" or "-02:30" and convert the timestamp
+    fn parse_timezone_offset(
+        timestamp: &chrono::DateTime<chrono::FixedOffset>,
+        tz_str: &str,
+    ) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        // Try to parse as numeric offset (e.g., "+11:00", "-02:30", "02:00")
+        let tz_str = tz_str.trim();
+
+        // Handle formats: "+HH:MM", "-HH:MM", "HH:MM", "+HHMM", "-HHMM", "HHMM"
+        let (sign, rest) = if tz_str.starts_with('+') {
+            (1, &tz_str[1..])
+        } else if tz_str.starts_with('-') {
+            (-1, &tz_str[1..])
+        } else {
+            (1, tz_str)
+        };
+
+        // Parse HH:MM or HHMM format
+        let (hours, minutes) = if rest.contains(':') {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() == 2 {
+                let h = parts[0].parse::<i32>().ok()?;
+                let m = parts[1].parse::<i32>().ok()?;
+                (h, m)
+            } else {
+                return None;
+            }
+        } else if rest.len() == 4 {
+            let h = rest[..2].parse::<i32>().ok()?;
+            let m = rest[2..].parse::<i32>().ok()?;
+            (h, m)
+        } else {
+            return None;
+        };
+
+        // Create FixedOffset
+        let total_seconds = sign * (hours * 3600 + minutes * 60);
+        let offset = chrono::FixedOffset::east_opt(total_seconds)?;
+
+        // Convert timestamp to this offset
+        Some(timestamp.with_timezone(&offset))
+    }
 
     /// Duration parses the provided argument into a [`Value::Duration`] value.
     ///
@@ -1542,21 +1585,40 @@ pub mod time {
     fn _duration(i: &str) -> Result<chrono::Duration> {
         // CEL duration range: -315576000000s to +315576000000s (approx +/- 10,000 years)
         const MAX_DURATION_SECS: i64 = 315_576_000_000;
+        // Max value that won't overflow when converted to nanoseconds
+        // i64::MAX nanoseconds / 1_000_000_000 = 9223372036 seconds
+        const MAX_DURATION_SECS_WITHOUT_OVERFLOW: i64 = 9_223_372_036;
 
         // Pre-validate to catch values that would overflow during parsing
         // Extract the numeric part and check if it's too large
         let trimmed = i.trim_start_matches('-');
         if let Some(s_pos) = trimmed.find('s') {
-            if let Ok(secs) = trimmed[..s_pos].parse::<i64>() {
-                if secs.abs() > MAX_DURATION_SECS {
-                    return Err(ExecutionError::function_error(
-                        "duration",
-                        &format!(
-                            "duration out of range: {} seconds exceeds maximum of +/- {} seconds",
-                            if i.starts_with('-') { -secs } else { secs },
-                            MAX_DURATION_SECS
-                        ),
-                    ));
+            // Check if there's a unit character directly after 's' (like 'ms')
+            // If not, this is seconds
+            if s_pos + 1 >= trimmed.len() || !trimmed.as_bytes()[s_pos + 1].is_ascii_alphabetic() {
+                if let Ok(secs) = trimmed[..s_pos].parse::<f64>() {
+                    let secs_i64 = secs.abs() as i64;
+                    if secs_i64 > MAX_DURATION_SECS {
+                        return Err(ExecutionError::function_error(
+                            "duration",
+                            &format!(
+                                "duration out of range: {} seconds exceeds maximum of +/- {} seconds",
+                                if i.starts_with('-') { -secs_i64 } else { secs_i64 },
+                                MAX_DURATION_SECS
+                            ),
+                        ));
+                    }
+                    // Check if converting to nanoseconds would overflow
+                    if secs_i64 > MAX_DURATION_SECS_WITHOUT_OVERFLOW {
+                        return Err(ExecutionError::function_error(
+                            "duration",
+                            &format!(
+                                "duration out of range: {} seconds exceeds maximum of +/- {} seconds",
+                                if i.starts_with('-') { -secs_i64 } else { secs_i64 },
+                                MAX_DURATION_SECS
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -1608,15 +1670,63 @@ pub mod time {
     }
 
     pub fn timestamp_month_day(
+        ftx: &FunctionContext,
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
+        Arguments(args): Arguments,
     ) -> Result<Value> {
-        Ok((this.day0() as i32).into())
+        if args.is_empty() {
+            // No timezone argument - use UTC (0-indexed, so day0)
+            Ok((this.day0() as i32).into())
+        } else {
+            // Timezone argument provided
+            let tz_name = match &args[0] {
+                Value::String(s) => s.as_str(),
+                _ => return Err(ftx.error("getDayOfMonth timezone argument must be a string")),
+            };
+
+            // Try parsing as a numeric offset first (e.g., "+11:00", "-02:30")
+            if let Some(converted) = parse_timezone_offset(&this, tz_name) {
+                return Ok((converted.day0() as i32).into());
+            }
+
+            // Parse as named timezone
+            let tz: chrono_tz::Tz = tz_name.parse()
+                .map_err(|_| ftx.error(format!("invalid timezone: {}", tz_name)))?;
+
+            // Convert to the specified timezone
+            let in_tz = this.with_timezone(&tz);
+            Ok((in_tz.day0() as i32).into())
+        }
     }
 
     pub fn timestamp_date(
+        ftx: &FunctionContext,
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
+        Arguments(args): Arguments,
     ) -> Result<Value> {
-        Ok((this.day() as i32).into())
+        if args.is_empty() {
+            // No timezone argument - use UTC
+            Ok((this.day() as i32).into())
+        } else {
+            // Timezone argument provided
+            let tz_name = match &args[0] {
+                Value::String(s) => s.as_str(),
+                _ => return Err(ftx.error("getDate timezone argument must be a string")),
+            };
+
+            // Try parsing as a numeric offset first
+            if let Some(converted) = parse_timezone_offset(&this, tz_name) {
+                return Ok((converted.day() as i32).into());
+            }
+
+            // Parse as named timezone
+            let tz: chrono_tz::Tz = tz_name.parse()
+                .map_err(|_| ftx.error(format!("invalid timezone: {}", tz_name)))?;
+
+            // Convert to the specified timezone
+            let in_tz = this.with_timezone(&tz);
+            Ok((in_tz.day() as i32).into())
+        }
     }
 
     pub fn timestamp_weekday(
@@ -1626,36 +1736,118 @@ pub mod time {
     }
 
     /// Extract hours from a timestamp or total hours from a duration
-    pub fn get_hours(This(this): This<Value>) -> Result<Value> {
+    pub fn get_hours(ftx: &FunctionContext, This(this): This<Value>, Arguments(args): Arguments) -> Result<Value> {
         match this {
-            Value::Timestamp(timestamp) => Ok((timestamp.hour() as i32).into()),
+            Value::Timestamp(timestamp) => {
+                if args.is_empty() {
+                    // No timezone argument - use UTC
+                    Ok((timestamp.hour() as i32).into())
+                } else {
+                    // Timezone argument provided
+                    let tz_name = match &args[0] {
+                        Value::String(s) => s.as_str(),
+                        _ => return Err(ftx.error("getHours timezone argument must be a string")),
+                    };
+
+                    // Try parsing as a numeric offset first
+                    if let Some(converted) = parse_timezone_offset(&timestamp, tz_name) {
+                        return Ok((converted.hour() as i32).into());
+                    }
+
+                    // Parse as named timezone
+                    let tz: chrono_tz::Tz = tz_name.parse()
+                        .map_err(|_| ftx.error(format!("invalid timezone: {}", tz_name)))?;
+
+                    // Convert to the specified timezone
+                    let in_tz = timestamp.with_timezone(&tz);
+                    Ok((in_tz.hour() as i32).into())
+                }
+            }
             Value::Duration(duration) => Ok(Value::Int(duration.num_hours())),
             _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
         }
     }
 
     /// Extract minutes from a timestamp or total minutes from a duration
-    pub fn get_minutes(This(this): This<Value>) -> Result<Value> {
+    pub fn get_minutes(ftx: &FunctionContext, This(this): This<Value>, Arguments(args): Arguments) -> Result<Value> {
         match this {
-            Value::Timestamp(timestamp) => Ok((timestamp.minute() as i32).into()),
+            Value::Timestamp(timestamp) => {
+                if args.is_empty() {
+                    // No timezone argument - use UTC
+                    Ok((timestamp.minute() as i32).into())
+                } else {
+                    // Timezone argument provided
+                    let tz_name = match &args[0] {
+                        Value::String(s) => s.as_str(),
+                        _ => return Err(ftx.error("getMinutes timezone argument must be a string")),
+                    };
+
+                    // Try parsing as a numeric offset first
+                    if let Some(converted) = parse_timezone_offset(&timestamp, tz_name) {
+                        return Ok((converted.minute() as i32).into());
+                    }
+
+                    // Parse as named timezone
+                    let tz: chrono_tz::Tz = tz_name.parse()
+                        .map_err(|_| ftx.error(format!("invalid timezone: {}", tz_name)))?;
+
+                    // Convert to the specified timezone
+                    let in_tz = timestamp.with_timezone(&tz);
+                    Ok((in_tz.minute() as i32).into())
+                }
+            }
             Value::Duration(duration) => Ok(Value::Int(duration.num_minutes())),
             _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
         }
     }
 
     /// Extract seconds from a timestamp or total seconds from a duration
-    pub fn get_seconds(This(this): This<Value>) -> Result<Value> {
+    pub fn get_seconds(ftx: &FunctionContext, This(this): This<Value>, Arguments(args): Arguments) -> Result<Value> {
         match this {
-            Value::Timestamp(timestamp) => Ok((timestamp.second() as i32).into()),
+            Value::Timestamp(timestamp) => {
+                if args.is_empty() {
+                    // No timezone argument - use UTC
+                    Ok((timestamp.second() as i32).into())
+                } else {
+                    // Timezone argument provided
+                    let tz_name = match &args[0] {
+                        Value::String(s) => s.as_str(),
+                        _ => return Err(ftx.error("getSeconds timezone argument must be a string")),
+                    };
+
+                    // Try parsing as a numeric offset first
+                    if let Some(converted) = parse_timezone_offset(&timestamp, tz_name) {
+                        return Ok((converted.second() as i32).into());
+                    }
+
+                    // Parse as named timezone
+                    let tz: chrono_tz::Tz = tz_name.parse()
+                        .map_err(|_| ftx.error(format!("invalid timezone: {}", tz_name)))?;
+
+                    // Convert to the specified timezone
+                    let in_tz = timestamp.with_timezone(&tz);
+                    Ok((in_tz.second() as i32).into())
+                }
+            }
             Value::Duration(duration) => Ok(Value::Int(duration.num_seconds())),
             _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
         }
     }
 
-    pub fn timestamp_millis(
-        This(this): This<chrono::DateTime<chrono::FixedOffset>>,
-    ) -> Result<Value> {
-        Ok((this.timestamp_subsec_millis() as i32).into())
+    pub fn get_milliseconds(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+        match this {
+            Value::Timestamp(timestamp) => {
+                Ok((timestamp.timestamp_subsec_millis() as i32).into())
+            }
+            Value::Duration(duration) => {
+                // Get the milliseconds component of the duration (not the total milliseconds)
+                // This extracts the milliseconds from the subsecond portion
+                let nanos = duration.num_nanoseconds().unwrap_or(0);
+                let millis = (nanos.abs() / 1_000_000) % 1000;
+                Ok(millis.into())
+            }
+            _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
+        }
     }
 }
 

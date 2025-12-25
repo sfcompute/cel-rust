@@ -62,6 +62,14 @@ pub struct Struct {
 
 impl PartialEq for Struct {
     fn eq(&self, other: &Self) -> bool {
+        // Special handling for google.protobuf.Any: compare semantically
+        #[cfg(feature = "proto")]
+        if self.type_name.as_str() == "google.protobuf.Any"
+            && other.type_name.as_str() == "google.protobuf.Any"
+        {
+            return compare_any_structs(self, other);
+        }
+
         // Structs are equal if they have the same type name and all fields are equal
         if self.type_name != other.type_name {
             return false;
@@ -80,6 +88,46 @@ impl PartialEq for Struct {
             }
         }
         true
+    }
+}
+
+/// Compare two google.protobuf.Any structs semantically.
+///
+/// This function extracts the type_url and value fields from both structs
+/// and performs semantic comparison of the protobuf wire format, so that
+/// messages with the same content but different field order are considered equal.
+#[cfg(feature = "proto")]
+fn compare_any_structs(a: &Struct, b: &Struct) -> bool {
+    // Extract type_url and value from both structs
+    let type_url_a = a.fields.get("type_url");
+    let type_url_b = b.fields.get("type_url");
+    let value_a = a.fields.get("value");
+    let value_b = b.fields.get("value");
+
+    // Check type_url equality
+    match (type_url_a, type_url_b) {
+        (Some(Value::String(url_a)), Some(Value::String(url_b))) => {
+            if url_a != url_b {
+                return false; // Different message types
+            }
+        }
+        (None, None) => {
+            // Both missing type_url, fall back to bytewise comparison
+            return match (value_a, value_b) {
+                (Some(Value::Bytes(a)), Some(Value::Bytes(b))) => a == b,
+                _ => false,
+            };
+        }
+        _ => return false, // type_url mismatch
+    }
+
+    // Compare value bytes semantically
+    match (value_a, value_b) {
+        (Some(Value::Bytes(bytes_a)), Some(Value::Bytes(bytes_b))) => {
+            crate::proto_compare::compare_any_values_semantic(bytes_a, bytes_b)
+        }
+        (None, None) => true, // Both empty
+        _ => false,
     }
 }
 
@@ -2357,10 +2405,22 @@ impl ops::Add<Value> for Value {
                 Ok(Value::Bytes(l))
             }
             #[cfg(feature = "chrono")]
-            (Value::Duration(l), Value::Duration(r)) => l
-                .checked_add(&r)
-                .ok_or(ExecutionError::Overflow("add", l.into(), r.into()))
-                .map(Value::Duration),
+            (Value::Duration(l), Value::Duration(r)) => {
+                // CEL duration range: -315576000000s to +315576000000s (approx +/- 10,000 years)
+                const MAX_DURATION_SECS: i64 = 315_576_000_000;
+
+                let result = l
+                    .checked_add(&r)
+                    .ok_or(ExecutionError::Overflow("add", l.into(), r.into()))?;
+
+                // Check if the result is within CEL's valid range
+                let total_secs = result.num_seconds();
+                if total_secs.abs() > MAX_DURATION_SECS {
+                    return Err(ExecutionError::Overflow("add", l.into(), r.into()));
+                }
+
+                Ok(Value::Duration(result))
+            }
             #[cfg(feature = "chrono")]
             (Value::Timestamp(l), Value::Duration(r)) => checked_op(TsOp::Add, &l, &r),
             #[cfg(feature = "chrono")]
@@ -2393,10 +2453,22 @@ impl ops::Sub<Value> for Value {
             (Value::Float(l), Value::Float(r)) => Value::Float(l - r).into(),
 
             #[cfg(feature = "chrono")]
-            (Value::Duration(l), Value::Duration(r)) => l
-                .checked_sub(&r)
-                .ok_or(ExecutionError::Overflow("sub", l.into(), r.into()))
-                .map(Value::Duration),
+            (Value::Duration(l), Value::Duration(r)) => {
+                // CEL duration range: -315576000000s to +315576000000s (approx +/- 10,000 years)
+                const MAX_DURATION_SECS: i64 = 315_576_000_000;
+
+                let result = l
+                    .checked_sub(&r)
+                    .ok_or(ExecutionError::Overflow("sub", l.into(), r.into()))?;
+
+                // Check if the result is within CEL's valid range
+                let total_secs = result.num_seconds();
+                if total_secs.abs() > MAX_DURATION_SECS {
+                    return Err(ExecutionError::Overflow("sub", l.into(), r.into()));
+                }
+
+                Ok(Value::Duration(result))
+            }
             #[cfg(feature = "chrono")]
             (Value::Timestamp(l), Value::Duration(r)) => checked_op(TsOp::Sub, &l, &r),
             #[cfg(feature = "chrono")]

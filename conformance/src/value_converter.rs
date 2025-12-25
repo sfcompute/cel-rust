@@ -230,6 +230,98 @@ fn convert_any_to_cel_value(any: &Any) -> Result<CelValue, ConversionError> {
                 }
             }
         }
+    } else if type_url.contains("google.protobuf.Duration") {
+        // google.protobuf.Duration has two fields:
+        // - field 1: seconds (int64, wire type 0 = varint)
+        // - field 2: nanos (int32, wire type 0 = varint)
+        let mut seconds: i64 = 0;
+        let mut nanos: i32 = 0;
+        let mut pos = 0;
+
+        while pos < any.value.len() {
+            if let Some((field_and_type, len)) = decode_varint(&any.value[pos..]) {
+                pos += len;
+                let field_num = field_and_type >> 3;
+                let wire_type = field_and_type & 0x07;
+
+                if field_num == 1 && wire_type == 0 {
+                    // seconds field
+                    if let Some((val, len)) = decode_varint(&any.value[pos..]) {
+                        seconds = val as i64;
+                        pos += len;
+                    } else {
+                        break;
+                    }
+                } else if field_num == 2 && wire_type == 0 {
+                    // nanos field
+                    if let Some((val, len)) = decode_varint(&any.value[pos..]) {
+                        nanos = val as i32;
+                        pos += len;
+                    } else {
+                        break;
+                    }
+                } else {
+                    // Unknown field, skip it
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Convert to CEL Duration
+        use chrono::Duration as ChronoDuration;
+        let duration = ChronoDuration::seconds(seconds) + ChronoDuration::nanoseconds(nanos as i64);
+        return Ok(Duration(duration));
+    } else if type_url.contains("google.protobuf.Timestamp") {
+        // google.protobuf.Timestamp has two fields:
+        // - field 1: seconds (int64, wire type 0 = varint)
+        // - field 2: nanos (int32, wire type 0 = varint)
+        let mut seconds: i64 = 0;
+        let mut nanos: i32 = 0;
+        let mut pos = 0;
+
+        while pos < any.value.len() {
+            if let Some((field_and_type, len)) = decode_varint(&any.value[pos..]) {
+                pos += len;
+                let field_num = field_and_type >> 3;
+                let wire_type = field_and_type & 0x07;
+
+                if field_num == 1 && wire_type == 0 {
+                    // seconds field
+                    if let Some((val, len)) = decode_varint(&any.value[pos..]) {
+                        seconds = val as i64;
+                        pos += len;
+                    } else {
+                        break;
+                    }
+                } else if field_num == 2 && wire_type == 0 {
+                    // nanos field
+                    if let Some((val, len)) = decode_varint(&any.value[pos..]) {
+                        nanos = val as i32;
+                        pos += len;
+                    } else {
+                        break;
+                    }
+                } else {
+                    // Unknown field, skip it
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Convert to CEL Timestamp
+        use chrono::{DateTime, TimeZone, Utc};
+        let timestamp = Utc.timestamp_opt(seconds, nanos as u32)
+            .single()
+            .ok_or_else(|| ConversionError::Unsupported(
+                "Invalid timestamp values".to_string()
+            ))?;
+        // Convert to FixedOffset (UTC = +00:00)
+        let fixed_offset = DateTime::from_naive_utc_and_offset(timestamp.naive_utc(), chrono::FixedOffset::east_opt(0).unwrap());
+        return Ok(Timestamp(fixed_offset));
     }
 
     // For other proto messages, try to decode them and convert to Struct
