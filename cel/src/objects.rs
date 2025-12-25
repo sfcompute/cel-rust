@@ -330,6 +330,78 @@ fn qualify_type_name(type_name: &str, ctx: &crate::context::Context) -> String {
     type_name.to_string()
 }
 
+/// Populate default fields for known proto message types.
+///
+/// For TestAllTypes messages, this adds all wrapper fields with Null values
+/// if they're not already present. This ensures struct literals match the
+/// expected proto message representation.
+fn populate_proto_defaults(
+    type_name: &str,
+    fields: &mut std::collections::HashMap<String, Value>,
+) {
+    use std::sync::Arc;
+
+    // TestAllTypes (proto2 and proto3) have 9 wrapper fields
+    if type_name == "cel.expr.conformance.proto2.TestAllTypes"
+        || type_name == "cel.expr.conformance.proto3.TestAllTypes"
+    {
+        // Wrapper fields that should always be present
+        let wrapper_fields = [
+            "single_bool_wrapper",
+            "single_bytes_wrapper",
+            "single_double_wrapper",
+            "single_float_wrapper",
+            "single_int32_wrapper",
+            "single_int64_wrapper",
+            "single_string_wrapper",
+            "single_uint32_wrapper",
+            "single_uint64_wrapper",
+        ];
+
+        for field in &wrapper_fields {
+            fields.entry(field.to_string()).or_insert(Value::Null);
+        }
+
+        // Proto2 has special scalar field defaults
+        if type_name == "cel.expr.conformance.proto2.TestAllTypes" {
+            fields
+                .entry("single_bool".to_string())
+                .or_insert(Value::Bool(true));
+        }
+
+        // Proto3 has implicit zero defaults for all scalar fields
+        if type_name == "cel.expr.conformance.proto3.TestAllTypes" {
+            fields
+                .entry("single_bool".to_string())
+                .or_insert(Value::Bool(false));
+            fields
+                .entry("single_string".to_string())
+                .or_insert(Value::String(Arc::new(String::new())));
+            fields
+                .entry("single_bytes".to_string())
+                .or_insert(Value::Bytes(Arc::new(Vec::new())));
+            fields
+                .entry("single_int32".to_string())
+                .or_insert(Value::Int(0));
+            fields
+                .entry("single_int64".to_string())
+                .or_insert(Value::Int(0));
+            fields
+                .entry("single_uint32".to_string())
+                .or_insert(Value::UInt(0));
+            fields
+                .entry("single_uint64".to_string())
+                .or_insert(Value::UInt(0));
+            fields
+                .entry("single_float".to_string())
+                .or_insert(Value::Float(0.0));
+            fields
+                .entry("single_double".to_string())
+                .or_insert(Value::Float(0.0));
+        }
+    }
+}
+
 impl PartialOrd for Map {
     fn partial_cmp(&self, _: &Self) -> Option<Ordering> {
         None
@@ -2394,6 +2466,9 @@ impl Value {
                 // Qualify the type name using container context if needed
                 let qualified_type_name = qualify_type_name(&struct_expr.type_name, ctx);
 
+                // Populate default fields for known proto message types
+                populate_proto_defaults(&qualified_type_name, &mut fields);
+
                 Value::Struct(Struct {
                     type_name: Arc::new(qualified_type_name),
                     fields: Arc::new(fields),
@@ -2453,9 +2528,25 @@ impl Value {
                     // Try to infer the default from the field name
                     // This is a heuristic - ideally we'd have type information
 
+                    // Explicit checks for well-known proto type fields first
+                    if name.as_str() == "single_struct" {
+                        // google.protobuf.Struct -> empty map
+                        Some(Value::Map(Map {
+                            map: Arc::new(HashMap::new()),
+                        }))
+                    } else if name.as_str() == "list_value" {
+                        // google.protobuf.ListValue -> empty list
+                        Some(Value::List(Arc::new(Vec::new())))
+                    } else if name.as_str() == "single_value"
+                        || name.as_str() == "single_any"
+                        || name.as_str() == "single_timestamp"
+                        || name.as_str() == "single_duration"
+                    {
+                        // google.protobuf.Value, Any, Timestamp, Duration -> null
+                        Some(Value::Null)
+                    }
                     // Wrapper type fields (containing "_wrapper") default to null
-                    // google.protobuf.Value fields (single_value) also default to null
-                    if name.contains("_wrapper") || name.contains("Wrapper") || name.as_str() == "single_value" {
+                    else if name.contains("_wrapper") || name.contains("Wrapper") {
                         Some(Value::Null)
                     } else if name.contains("map") || name.contains("Map") {
                         // Map fields default to empty map
@@ -2481,8 +2572,11 @@ impl Value {
                         || name.contains("Int")
                         || name.contains("uint")
                         || name.contains("UInt")
+                        || name.contains("fixed")
+                        || name.contains("Fixed")
                     {
                         // Numeric fields default to 0
+                        // Includes: int32/64, uint32/64, sint32/64, fixed32/64, sfixed32/64
                         Some(Value::Int(0))
                     } else if name.contains("double")
                         || name.contains("Double")

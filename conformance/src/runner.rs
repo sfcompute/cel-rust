@@ -21,9 +21,9 @@ struct ContainerResolver {
 
 impl VariableResolver for ContainerResolver {
     fn resolve(&self, variable: &str) -> Option<CelValue> {
-        // If container is non-empty and the variable name doesn't contain a dot,
+        // If container is non-empty and the variable is not already fully qualified,
         // try the prefixed version first
-        if !self.container.is_empty() && !variable.contains('.') {
+        if !self.container.is_empty() && !variable.starts_with(&format!("{}.", self.container)) {
             let prefixed = format!("{}.{}", self.container, variable);
             if let Some(value) = self.variables.get(&prefixed) {
                 return Some(value.clone());
@@ -33,6 +33,111 @@ impl VariableResolver for ContainerResolver {
         // Fall back to exact match
         self.variables.get(variable).cloned()
     }
+}
+
+/// Get a list of proto type names to register for a given container.
+///
+/// These types need to be available as variables so expressions like
+/// `GlobalEnum.GAZ` can resolve `GlobalEnum` to the type name string.
+fn get_container_type_names(container: &str) -> Vec<(String, String)> {
+    let mut types = Vec::new();
+
+    match container {
+        "cel.expr.conformance.proto2" => {
+            types.push((
+                "cel.expr.conformance.proto2.TestAllTypes".to_string(),
+                "cel.expr.conformance.proto2.TestAllTypes".to_string(),
+            ));
+            types.push((
+                "cel.expr.conformance.proto2.NestedTestAllTypes".to_string(),
+                "cel.expr.conformance.proto2.NestedTestAllTypes".to_string(),
+            ));
+            types.push((
+                "cel.expr.conformance.proto2.GlobalEnum".to_string(),
+                "cel.expr.conformance.proto2.GlobalEnum".to_string(),
+            ));
+            types.push((
+                "cel.expr.conformance.proto2.TestAllTypes.NestedEnum".to_string(),
+                "cel.expr.conformance.proto2.TestAllTypes.NestedEnum".to_string(),
+            ));
+        }
+        "cel.expr.conformance.proto3" => {
+            types.push((
+                "cel.expr.conformance.proto3.TestAllTypes".to_string(),
+                "cel.expr.conformance.proto3.TestAllTypes".to_string(),
+            ));
+            types.push((
+                "cel.expr.conformance.proto3.NestedTestAllTypes".to_string(),
+                "cel.expr.conformance.proto3.NestedTestAllTypes".to_string(),
+            ));
+            types.push((
+                "cel.expr.conformance.proto3.GlobalEnum".to_string(),
+                "cel.expr.conformance.proto3.GlobalEnum".to_string(),
+            ));
+            types.push((
+                "cel.expr.conformance.proto3.TestAllTypes.NestedEnum".to_string(),
+                "cel.expr.conformance.proto3.TestAllTypes.NestedEnum".to_string(),
+            ));
+        }
+        "google.protobuf" => {
+            types.push((
+                "google.protobuf.NullValue".to_string(),
+                "google.protobuf.NullValue".to_string(),
+            ));
+            types.push((
+                "google.protobuf.Value".to_string(),
+                "google.protobuf.Value".to_string(),
+            ));
+            types.push((
+                "google.protobuf.ListValue".to_string(),
+                "google.protobuf.ListValue".to_string(),
+            ));
+            types.push((
+                "google.protobuf.Struct".to_string(),
+                "google.protobuf.Struct".to_string(),
+            ));
+            // Wrapper types
+            types.push((
+                "google.protobuf.Int32Value".to_string(),
+                "google.protobuf.Int32Value".to_string(),
+            ));
+            types.push((
+                "google.protobuf.UInt32Value".to_string(),
+                "google.protobuf.UInt32Value".to_string(),
+            ));
+            types.push((
+                "google.protobuf.Int64Value".to_string(),
+                "google.protobuf.Int64Value".to_string(),
+            ));
+            types.push((
+                "google.protobuf.UInt64Value".to_string(),
+                "google.protobuf.UInt64Value".to_string(),
+            ));
+            types.push((
+                "google.protobuf.FloatValue".to_string(),
+                "google.protobuf.FloatValue".to_string(),
+            ));
+            types.push((
+                "google.protobuf.DoubleValue".to_string(),
+                "google.protobuf.DoubleValue".to_string(),
+            ));
+            types.push((
+                "google.protobuf.BoolValue".to_string(),
+                "google.protobuf.BoolValue".to_string(),
+            ));
+            types.push((
+                "google.protobuf.StringValue".to_string(),
+                "google.protobuf.StringValue".to_string(),
+            ));
+            types.push((
+                "google.protobuf.BytesValue".to_string(),
+                "google.protobuf.BytesValue".to_string(),
+            ));
+        }
+        _ => {}
+    }
+
+    types
 }
 
 pub struct ConformanceRunner {
@@ -171,7 +276,16 @@ impl ConformanceRunner {
         // Prepare container resolver if needed (must be declared outside the block to live long enough)
         let mut variables_map = BTreeMap::new();
         let container = test.container.clone();
-        let use_resolver = !container.is_empty() && !test.bindings.is_empty();
+
+        // Add proto type names for container-aware type resolution
+        if !container.is_empty() {
+            for (type_name, type_value) in get_container_type_names(&container) {
+                variables_map.insert(type_name, CelValue::String(Arc::new(type_value)));
+            }
+        }
+
+        // Always create resolver if container is set (even without bindings)
+        let use_resolver = !container.is_empty();
 
         if !test.bindings.is_empty() {
             for (key, expr_value) in &test.bindings {
