@@ -270,7 +270,6 @@ impl Default for Context<'_> {
         ctx.add_function("upperAscii", functions::upper_ascii);
         ctx.add_function("reverse", functions::reverse);
         ctx.add_function("format", functions::format);
-        ctx.add_function("type", functions::type_of);
         ctx.add_variable("type", Value::String(Arc::new("type".to_string())));
         ctx.add_variable("null_type", Value::String(Arc::new("null_type".to_string())));
         ctx.add_variable("optional_type", Value::String(Arc::new("optional_type".to_string())));

@@ -191,11 +191,22 @@ pub fn string(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         },
         Value::Struct(ref s) => {
             // Handle protobuf wrapper types by extracting their value field
-            if s.type_name.as_str().starts_with("google.protobuf.") && 
+            if s.type_name.as_str().starts_with("google.protobuf.") &&
                (s.type_name.as_str().ends_with("Value") || s.type_name.as_str() == "google.protobuf.StringValue") {
                 if let Some(value) = s.fields.get("value") {
                     // Recursively convert the value field to string
                     return string(ftx, This(value.clone()));
+                }
+            }
+            return Err(ftx.error(format!("cannot convert {this:?} to string")));
+        },
+        Value::Opaque(ref opaque) => {
+            // Handle DynValue specially - convert the inner value to string
+            use crate::objects::DynValue;
+            use std::ops::Deref;
+            if opaque.runtime_type_name() == "dyn" {
+                if let Some(dyn_val) = opaque.deref().downcast_ref::<DynValue>() {
+                    return string(ftx, This(dyn_val.inner().clone()));
                 }
             }
             return Err(ftx.error(format!("cannot convert {this:?} to string")));
@@ -272,8 +283,20 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
 /// The `dyn` function marks a value as dynamic during type-checking.
 /// At runtime, it simply returns the value unchanged.
 pub fn dyn_(_ftx: &FunctionContext, value: Value) -> Result<Value> {
-    // At runtime, dyn is a no-op - just return the value
-    Ok(value)
+    // Wrap the value in DynValue to mark it as dynamically typed
+    // This allows math functions to reject it with "no such overload"
+    use crate::objects::DynValue;
+    Ok(Value::Opaque(Arc::new(DynValue::new(value))))
+}
+
+/// Helper to reject dyn() wrapped values with "no such overload" error.
+fn reject_dyn_value(ftx: &FunctionContext, value: &Value, _fn_name: &str) -> Result<()> {
+    if let Value::Opaque(opaque) = value {
+        if opaque.runtime_type_name() == "dyn" {
+            return Err(ftx.error("no such overload"));
+        }
+    }
+    Ok(())
 }
 
 /// The `type` function returns the type name of a value as a string.
@@ -285,7 +308,15 @@ pub fn type_(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         Value::Int(_) => "int",
         Value::UInt(_) => "uint",
         Value::Float(_) => "double",
-        Value::String(_) => "string",
+        Value::String(s) => {
+            // Check if this is a type denotation
+            match s.as_str() {
+                "bool" | "int" | "uint" | "double" | "string" | "bytes" | "list" | "map"
+                | "null_type" | "type" | "math" | "google.protobuf.Timestamp"
+                | "google.protobuf.Duration" => "type",
+                _ => "string",
+            }
+        }
         Value::Bytes(_) => "bytes",
         Value::List(_) => "list",
         Value::Map(_) => "map",
@@ -298,7 +329,22 @@ pub fn type_(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         #[cfg(feature = "chrono")]
         Value::Duration(_) => "google.protobuf.Duration",
         Value::Function(_, _) => "function",
-        Value::Opaque(_) => return Err(ftx.error("type() not supported for opaque values")),
+        Value::Opaque(ref opaque) => {
+            // Handle DynValue specially - return the type of the inner value
+            use crate::objects::DynValue;
+            use std::ops::Deref;
+            if opaque.runtime_type_name() == "dyn" {
+                if let Some(dyn_val) = opaque.deref().downcast_ref::<DynValue>() {
+                    // Recursively call type_ on the inner value
+                    return type_(ftx, This(dyn_val.inner().clone()));
+                }
+            }
+            // Handle OptionalValue - return "optional_type"
+            if opaque.runtime_type_name() == "optional_type" {
+                return Ok(Value::String(Arc::new("optional_type".to_string())));
+            }
+            return Err(ftx.error("type() not supported for opaque values"));
+        }
     };
     Ok(Value::String(Arc::new(type_name.to_string())))
 }
@@ -484,14 +530,15 @@ pub fn char_at(ftx: &FunctionContext, This(this): This<Arc<String>>, index: i64)
     if index < 0 {
         return Err(ftx.error(format!("charAt index {} is negative", index)));
     }
-    
+
     let chars: Vec<char> = this.chars().collect();
     let idx = index as usize;
-    
+
     if idx >= chars.len() {
-        return Err(ftx.error(format!("charAt index {} is out of range for string of length {}", index, chars.len())));
+        // Return empty string when index is out of bounds
+        return Ok(Value::String(Arc::new(String::new())));
     }
-    
+
     Ok(Value::String(Arc::new(chars[idx].to_string())))
 }
 
@@ -668,16 +715,16 @@ pub fn is_nan(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
 pub fn sign(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     match this {
         Value::Int(i) => Ok(Value::Int(i.signum())),
-        Value::UInt(u) => Ok(Value::Int(if u == 0 { 0 } else { 1 })),
+        Value::UInt(u) => Ok(Value::UInt(if u == 0 { 0 } else { 1 })),
         Value::Float(f) => {
             if f.is_nan() {
                 Ok(Value::Float(f))
             } else if f > 0.0 {
-                Ok(Value::Int(1))
+                Ok(Value::Float(1.0))
             } else if f < 0.0 {
-                Ok(Value::Int(-1))
+                Ok(Value::Float(-1.0))
             } else {
-                Ok(Value::Int(0))
+                Ok(Value::Float(0.0))
             }
         },
         v => Err(ftx.error(format!("sign not supported for {v:?}"))),
@@ -1092,15 +1139,11 @@ pub fn round(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     match this {
         Value::Float(f) => {
             let rounded = f.round();
-            // Return as integer if it fits in i64 range, otherwise as float
-            if rounded >= i64::MIN as f64 && rounded <= i64::MAX as f64 {
-                Ok(Value::Int(rounded as i64))
-            } else {
-                Ok(Value::Float(rounded))
-            }
+            // Always return Float per CEL spec
+            Ok(Value::Float(rounded))
         }
-        Value::Int(i) => Ok(Value::Int(i)), // Already an integer
-        Value::UInt(u) => Ok(Value::UInt(u)), // Already an integer
+        Value::Int(i) => Ok(Value::Float(i as f64)), // Convert to Float
+        Value::UInt(u) => Ok(Value::Float(u as f64)), // Convert to Float
         v => Err(ftx.error(format!("round not supported for {v:?}"))),
     }
 }
@@ -1183,10 +1226,16 @@ fn base64_encode_simple(input: &[u8]) -> String {
 /// Simplified base64 decoding
 fn base64_decode_simple(input: &str) -> std::result::Result<Vec<u8>, &'static str> {
     let input = input.trim();
-    if input.len() % 4 != 0 {
-        return Err("Invalid base64 length");
-    }
-    
+
+    // Pad the input to make it a multiple of 4 if needed
+    let input_padded = if input.len() % 4 != 0 {
+        let padding_needed = 4 - (input.len() % 4);
+        format!("{}{}", input, "=".repeat(padding_needed))
+    } else {
+        input.to_string()
+    };
+    let input = input_padded.as_str();
+
     let mut result = Vec::new();
     for chunk in input.as_bytes().chunks(4) {
         if chunk.len() != 4 {
@@ -1584,8 +1633,8 @@ pub fn least(Arguments(args): Arguments) -> Result<Value> {
 pub fn trunc(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     match this {
         Value::Float(f) => Ok(Value::Float(f.trunc())),
-        Value::Int(i) => Ok(Value::Int(i)),
-        Value::UInt(u) => Ok(Value::UInt(u)),
+        Value::Int(i) => Ok(Value::Float(i as f64)),
+        Value::UInt(u) => Ok(Value::Float(u as f64)),
         v => Err(ftx.error(format!("cannot truncate {v:?}"))),
     }
 }
@@ -1594,8 +1643,8 @@ pub fn trunc(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
 pub fn floor(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     match this {
         Value::Float(f) => Ok(Value::Float(f.floor())),
-        Value::Int(i) => Ok(Value::Int(i)),
-        Value::UInt(u) => Ok(Value::UInt(u)),
+        Value::Int(i) => Ok(Value::Float(i as f64)),
+        Value::UInt(u) => Ok(Value::Float(u as f64)),
         v => Err(ftx.error(format!("cannot floor {v:?}"))),
     }
 }
@@ -1604,8 +1653,8 @@ pub fn floor(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
 pub fn ceil(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     match this {
         Value::Float(f) => Ok(Value::Float(f.ceil())),
-        Value::Int(i) => Ok(Value::Int(i)),
-        Value::UInt(u) => Ok(Value::UInt(u)),
+        Value::Int(i) => Ok(Value::Float(i as f64)),
+        Value::UInt(u) => Ok(Value::Float(u as f64)),
         v => Err(ftx.error(format!("cannot ceil {v:?}"))),
     }
 }
@@ -1685,32 +1734,40 @@ pub fn bit_not(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> 
 /// Bitwise left shift operation.
 pub fn bit_shift_left(ftx: &FunctionContext, left: Value, right: Value) -> Result<Value> {
     match (left, right) {
-        (Value::Int(a), Value::Int(b)) => {
-            if b < 0 || b > 63 {
+        (Value::Int(_a), Value::Int(b)) => {
+            if b < 0 {
                 Err(ftx.error(format!("shift amount {} out of range", b)))
+            } else if b >= 64 {
+                // Shifting by >= 64 bits results in 0
+                Ok(Value::Int(0))
             } else {
-                Ok(Value::Int(a << b))
+                Ok(Value::Int(_a << b))
             }
         }
-        (Value::UInt(a), Value::Int(b)) => {
-            if b < 0 || b > 63 {
+        (Value::UInt(_a), Value::Int(b)) => {
+            if b < 0 {
                 Err(ftx.error(format!("shift amount {} out of range", b)))
+            } else if b >= 64 {
+                // Shifting by >= 64 bits results in 0
+                Ok(Value::UInt(0))
             } else {
-                Ok(Value::UInt(a << b))
+                Ok(Value::UInt(_a << b))
             }
         }
-        (Value::Int(a), Value::UInt(b)) => {
-            if b > 63 {
-                Err(ftx.error(format!("shift amount {} out of range", b)))
+        (Value::Int(_a), Value::UInt(b)) => {
+            if b >= 64 {
+                // Shifting by >= 64 bits results in 0
+                Ok(Value::Int(0))
             } else {
-                Ok(Value::Int(a << b))
+                Ok(Value::Int(_a << b))
             }
         }
-        (Value::UInt(a), Value::UInt(b)) => {
-            if b > 63 {
-                Err(ftx.error(format!("shift amount {} out of range", b)))
+        (Value::UInt(_a), Value::UInt(b)) => {
+            if b >= 64 {
+                // Shifting by >= 64 bits results in 0
+                Ok(Value::UInt(0))
             } else {
-                Ok(Value::UInt(a << b))
+                Ok(Value::UInt(_a << b))
             }
         }
         (left, right) => Err(ftx.error(format!("bitShiftLeft not supported for {left:?} and {right:?}"))),
@@ -1718,32 +1775,45 @@ pub fn bit_shift_left(ftx: &FunctionContext, left: Value, right: Value) -> Resul
 }
 
 /// Bitwise right shift operation.
+/// CEL uses logical right shift (no sign extension) for all types.
 pub fn bit_shift_right(ftx: &FunctionContext, left: Value, right: Value) -> Result<Value> {
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => {
-            if b < 0 || b > 63 {
+            if b < 0 {
                 Err(ftx.error(format!("shift amount {} out of range", b)))
+            } else if b >= 64 {
+                // Logical right shift by >= 64 bits results in 0
+                Ok(Value::Int(0))
             } else {
-                Ok(Value::Int(a >> b))
+                // CEL uses logical right shift - treat as unsigned
+                let unsigned = a as u64;
+                Ok(Value::Int((unsigned >> b) as i64))
             }
         }
         (Value::UInt(a), Value::Int(b)) => {
-            if b < 0 || b > 63 {
+            if b < 0 {
                 Err(ftx.error(format!("shift amount {} out of range", b)))
+            } else if b >= 64 {
+                // Shifting by >= 64 bits results in 0
+                Ok(Value::UInt(0))
             } else {
                 Ok(Value::UInt(a >> b))
             }
         }
         (Value::Int(a), Value::UInt(b)) => {
-            if b > 63 {
-                Err(ftx.error(format!("shift amount {} out of range", b)))
+            if b >= 64 {
+                // Logical right shift by >= 64 bits results in 0
+                Ok(Value::Int(0))
             } else {
-                Ok(Value::Int(a >> b))
+                // CEL uses logical right shift - treat as unsigned
+                let unsigned = a as u64;
+                Ok(Value::Int((unsigned >> b) as i64))
             }
         }
         (Value::UInt(a), Value::UInt(b)) => {
-            if b > 63 {
-                Err(ftx.error(format!("shift amount {} out of range", b)))
+            if b >= 64 {
+                // Shifting by >= 64 bits results in 0
+                Ok(Value::UInt(0))
             } else {
                 Ok(Value::UInt(a >> b))
             }
@@ -2072,6 +2142,17 @@ fn format_value(
         }
         ('b', Value::UInt(u)) => Ok(format!("{:b}", u)),
         ('b', Value::Bool(b)) => Ok(if *b { "1".to_string() } else { "0".to_string() }),
+        // Handle DynValue specially - format the inner value
+        (_, Value::Opaque(opaque)) => {
+            use crate::objects::DynValue;
+            use std::ops::Deref;
+            if opaque.runtime_type_name() == "dyn" {
+                if let Some(dyn_val) = opaque.deref().downcast_ref::<DynValue>() {
+                    return format_value(dyn_val.inner(), conversion, precision, ftx);
+                }
+            }
+            Err(ftx.error(format!("unsupported format specifier %{} for value type", conversion)))
+        }
         _ => Err(ftx.error(format!("unsupported format specifier %{} for value type", conversion))),
     }
 }
@@ -2207,7 +2288,15 @@ fn format_value_as_string(value: &Value) -> std::result::Result<String, String> 
         }
         // Dyn values are wrapped in Opaque, handle them there
         Value::Function(_, _) => Ok("<function>".to_string()),
-        Value::Opaque(_) => {
+        Value::Opaque(ref opaque) => {
+            // Handle DynValue specially - format the inner value
+            use crate::objects::DynValue;
+            use std::ops::Deref;
+            if opaque.runtime_type_name() == "dyn" {
+                if let Some(dyn_val) = opaque.deref().downcast_ref::<DynValue>() {
+                    return format_value_as_string(dyn_val.inner());
+                }
+            }
             // Try to convert OptionalValue
             if let Ok(opt) = <&OptionalValue>::try_from(value) {
                 if let Some(inner) = opt.value() {

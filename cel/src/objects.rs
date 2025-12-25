@@ -386,6 +386,31 @@ impl dyn Opaque {
     }
 }
 
+/// Represents a dynamically-typed value created by the dyn() function.
+/// Math functions reject these with "no such overload" per CEL spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynValue {
+    inner: Box<Value>,
+}
+
+impl DynValue {
+    pub fn new(value: Value) -> Self {
+        DynValue {
+            inner: Box::new(value),
+        }
+    }
+
+    pub fn inner(&self) -> &Value {
+        &self.inner
+    }
+}
+
+impl Opaque for DynValue {
+    fn runtime_type_name(&self) -> &str {
+        "dyn"
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct OptionalValue {
     value: Option<Value>,
@@ -677,7 +702,28 @@ impl PartialEq for Value {
             (Value::UInt(a), Value::Float(b)) => (*a as f64) == *b,
             (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
             (Value::Float(a), Value::UInt(b)) => *a == (*b as f64),
-            (Value::Opaque(a), Value::Opaque(b)) => a.opaque_eq(b.deref()),
+            // Handle DynValue specially - compare inner values
+            (Value::Opaque(a), Value::Opaque(b)) => {
+                // Try to downcast both to DynValue
+                if a.runtime_type_name() == "dyn" && b.runtime_type_name() == "dyn" {
+                    if let (Some(dyn_a), Some(dyn_b)) = (
+                        a.deref().downcast_ref::<DynValue>(),
+                        b.deref().downcast_ref::<DynValue>(),
+                    ) {
+                        return dyn_a.inner().eq(dyn_b.inner());
+                    }
+                }
+                a.opaque_eq(b.deref())
+            }
+            // Compare DynValue with non-opaque values
+            (Value::Opaque(a), other) | (other, Value::Opaque(a)) => {
+                if a.runtime_type_name() == "dyn" {
+                    if let Some(dyn_val) = a.deref().downcast_ref::<DynValue>() {
+                        return dyn_val.inner().eq(other);
+                    }
+                }
+                false
+            }
             (_, _) => false,
         }
     }
@@ -720,6 +766,36 @@ impl PartialOrd for Value {
             (Value::UInt(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
             (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
             (Value::Float(a), Value::UInt(b)) => a.partial_cmp(&(*b as f64)),
+            // Handle DynValue specially - compare inner values
+            (Value::Opaque(a), Value::Opaque(b)) => {
+                // Try to downcast both to DynValue
+                if a.runtime_type_name() == "dyn" && b.runtime_type_name() == "dyn" {
+                    if let (Some(dyn_a), Some(dyn_b)) = (
+                        a.deref().downcast_ref::<DynValue>(),
+                        b.deref().downcast_ref::<DynValue>(),
+                    ) {
+                        return dyn_a.inner().partial_cmp(dyn_b.inner());
+                    }
+                }
+                None
+            }
+            // Compare DynValue with non-opaque values
+            (Value::Opaque(a), other) => {
+                if a.runtime_type_name() == "dyn" {
+                    if let Some(dyn_val) = a.deref().downcast_ref::<DynValue>() {
+                        return dyn_val.inner().partial_cmp(other);
+                    }
+                }
+                None
+            }
+            (other, Value::Opaque(b)) => {
+                if b.runtime_type_name() == "dyn" {
+                    if let Some(dyn_val) = b.deref().downcast_ref::<DynValue>() {
+                        return other.partial_cmp(dyn_val.inner());
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -999,6 +1075,17 @@ impl Value {
                                 (Value::Float(a), Value::UInt(b)) => *a < (*b as f64),
                                 (Value::Bool(a), Value::Bool(b)) => a < b,
 
+                                // Handle DynValue - use PartialOrd which we've already implemented
+                                (Value::Opaque(ref a), _) | (_, Value::Opaque(ref a))
+                                    if a.runtime_type_name() == "dyn" =>
+                                {
+                                    // Use the PartialOrd implementation which handles DynValue
+                                    match left.partial_cmp(&right) {
+                                        Some(std::cmp::Ordering::Less) => true,
+                                        _ => false,
+                                    }
+                                }
+
                                 // Explicitly reject List, Map, Null, and other unsupported types
                                 (Value::List(_), _) | (_, Value::List(_)) => {
                                     return Err(ExecutionError::NoSuchOverload);
@@ -1051,6 +1138,16 @@ impl Value {
                                 (Value::Float(a), Value::Int(b)) => *a <= (*b as f64),
                                 (Value::Float(a), Value::UInt(b)) => *a <= (*b as f64),
                                 (Value::Bool(a), Value::Bool(b)) => a <= b,
+
+                                // Handle DynValue - use PartialOrd which we've already implemented
+                                (Value::Opaque(ref a), _) | (_, Value::Opaque(ref a))
+                                    if a.runtime_type_name() == "dyn" =>
+                                {
+                                    match left.partial_cmp(&right) {
+                                        Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => true,
+                                        _ => false,
+                                    }
+                                }
 
                                 // Explicitly reject List, Map, Null, and other unsupported types
                                 (Value::List(_), _) | (_, Value::List(_)) => {
@@ -1105,6 +1202,16 @@ impl Value {
                                 (Value::Float(a), Value::UInt(b)) => *a > (*b as f64),
                                 (Value::Bool(a), Value::Bool(b)) => a > b,
 
+                                // Handle DynValue - use PartialOrd which we've already implemented
+                                (Value::Opaque(ref a), _) | (_, Value::Opaque(ref a))
+                                    if a.runtime_type_name() == "dyn" =>
+                                {
+                                    match left.partial_cmp(&right) {
+                                        Some(std::cmp::Ordering::Greater) => true,
+                                        _ => false,
+                                    }
+                                }
+
                                 // Explicitly reject List, Map, Null, and other unsupported types
                                 (Value::List(_), _) | (_, Value::List(_)) => {
                                     return Err(ExecutionError::NoSuchOverload);
@@ -1158,6 +1265,16 @@ impl Value {
                                 (Value::Float(a), Value::UInt(b)) => *a >= (*b as f64),
                                 (Value::Bool(a), Value::Bool(b)) => a >= b,
 
+                                // Handle DynValue - use PartialOrd which we've already implemented
+                                (Value::Opaque(ref a), _) | (_, Value::Opaque(ref a))
+                                    if a.runtime_type_name() == "dyn" =>
+                                {
+                                    match left.partial_cmp(&right) {
+                                        Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => true,
+                                        _ => false,
+                                    }
+                                }
+
                                 // Explicitly reject List, Map, Null, and other unsupported types
                                 (Value::List(_), _) | (_, Value::List(_)) => {
                                     return Err(ExecutionError::NoSuchOverload);
@@ -1184,6 +1301,44 @@ impl Value {
                                 }
                                 (any, Value::List(v)) => {
                                     return Value::Bool(v.contains(&any)).into()
+                                }
+                                // Special handling for float keys - try int and uint conversions
+                                (Value::Float(f), Value::Map(m)) => {
+                                    if f.fract() == 0.0 {
+                                        let as_int = f as i64;
+                                        let as_uint = f as u64;
+                                        // Try int key first, then uint key
+                                        let found = m.map.contains_key(&Key::Int(as_int)) ||
+                                                    m.map.contains_key(&Key::Uint(as_uint));
+                                        return Value::Bool(found).into();
+                                    }
+                                    return Value::Bool(false).into();
+                                }
+                                // Handle int keys - also check for equivalent uint key
+                                (Value::Int(i), Value::Map(m)) => {
+                                    if m.map.contains_key(&Key::Int(i)) {
+                                        return Value::Bool(true).into();
+                                    }
+                                    // If positive, also try as uint
+                                    if i >= 0 {
+                                        if m.map.contains_key(&Key::Uint(i as u64)) {
+                                            return Value::Bool(true).into();
+                                        }
+                                    }
+                                    return Value::Bool(false).into();
+                                }
+                                // Handle uint keys - also check for equivalent int key
+                                (Value::UInt(u), Value::Map(m)) => {
+                                    if m.map.contains_key(&Key::Uint(u)) {
+                                        return Value::Bool(true).into();
+                                    }
+                                    // If fits in i64, also try as int
+                                    if let Ok(as_int) = TryInto::<i64>::try_into(u) {
+                                        if m.map.contains_key(&Key::Int(as_int)) {
+                                            return Value::Bool(true).into();
+                                        }
+                                    }
+                                    return Value::Bool(false).into();
                                 }
                                 (any, Value::Map(m)) => match any.try_into() {
                                     Ok(key) => return Value::Bool(m.map.contains_key(&key)).into(),
@@ -1284,7 +1439,7 @@ impl Value {
                         }
                         operators::INDEX | operators::OPT_INDEX => {
                             let mut value = Value::resolve(&call.args[0], ctx)?;
-                            let idx = Value::resolve(&call.args[1], ctx)?;
+                            let mut idx = Value::resolve(&call.args[1], ctx)?;
                             let mut is_optional = call.func_name == operators::OPT_INDEX;
 
                             // Unwrap OptionalValue if present
@@ -1296,6 +1451,17 @@ impl Value {
                                         return Ok(Value::Opaque(Arc::new(OptionalValue::none())))
                                     }
                                 };
+                            }
+
+                            // Unwrap DynValue if present on the index
+                            if let Value::Opaque(ref opaque) = idx {
+                                use crate::objects::DynValue;
+                                use std::ops::Deref;
+                                if opaque.runtime_type_name() == "dyn" {
+                                    if let Some(dyn_val) = opaque.deref().downcast_ref::<DynValue>() {
+                                        idx = dyn_val.inner().clone();
+                                    }
+                                }
                             }
 
                             let result = match (value, idx) {
@@ -1590,6 +1756,41 @@ impl Value {
                     &select.field
                 };
 
+                // Check for exact qualified identifier match BEFORE attempting field selection
+                // This ensures that if both "a.b.c" and "a.b" exist as variables, "a.b.c" takes priority
+                let mut parts = vec![field];
+                let mut current = select.operand.deref();
+
+                // Walk the Select chain backwards to build the full qualified path
+                loop {
+                    match &current.expr {
+                        Expr::Select(s) => {
+                            parts.push(s.field.as_str());
+                            current = &s.operand;
+                        }
+                        Expr::Ident(name) => {
+                            parts.push(name.as_str());
+                            break;
+                        }
+                        _ => {
+                            // Not a simple qualified identifier chain (e.g., foo().bar)
+                            // Clear parts to skip exact match check
+                            parts.clear();
+                            break;
+                        }
+                    }
+                }
+
+                // Try exact match if we have a qualified path
+                if !parts.is_empty() {
+                    parts.reverse();
+                    let full_path = parts.join(".");
+                    if let Ok(value) = ctx.get_variable(&full_path) {
+                        return Ok(value);
+                    }
+                }
+
+                // No exact match found, proceed with normal field selection
                 // Try to resolve the operand normally
                 let left_result = Value::resolve(select.operand.deref(), ctx);
 
