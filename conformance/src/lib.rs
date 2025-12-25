@@ -42,14 +42,25 @@ mod tests {
 
     #[test]
     fn conformance_all() {
-        let results = run_conformance_tests(None);
-        results.print_summary();
-        
-        if !results.failed.is_empty() {
-            panic!(
-                "{} conformance test(s) failed. See output above for details.",
-                results.failed.len()
-            );
+        // Increase stack size to 8MB for prost-reflect parsing of complex nested messages
+        let handle = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let results = run_conformance_tests(None);
+                results.print_summary();
+
+                if !results.failed.is_empty() {
+                    panic!(
+                        "{} conformance test(s) failed. See output above for details.",
+                        results.failed.len()
+                    );
+                }
+            })
+            .unwrap();
+
+        // Propagate any panic from the thread
+        if let Err(e) = handle.join() {
+            std::panic::resume_unwind(e);
         }
     }
 

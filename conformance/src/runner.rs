@@ -88,35 +88,16 @@ impl ConformanceRunner {
     fn run_test_file(&self, path: &Path, proto_dir: &Path) -> Result<TestResults, RunnerError> {
         let content = fs::read_to_string(path)?;
 
-        // Parse textproto using protoc
-        let test_file: SimpleTestFile = match parse_textproto_to_prost(
+        // Parse textproto using prost-reflect (with protoc fallback)
+        let test_file: SimpleTestFile = parse_textproto_to_prost(
             &content,
             "cel.expr.conformance.test.SimpleTestFile",
             &["cel/expr/conformance/test/simple.proto"],
             &[proto_dir.to_str().unwrap()],
-        ) {
-            Ok(file) => file,
-            Err(crate::textproto::TextprotoParseError::AnyMessageUnsupported(msg)) => {
-                // Some test files contain Any messages that protoc --encode can't handle
-                // At the time of writing there doesn't appear to be a rust library
-                // that both supports textproto and any messages with URLs (descriptor sets)
-                // Skip these files for now with a warning (printed in dim)
-                use std::io::Write;
-                use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
-                let mut stderr = StandardStream::stderr(ColorChoice::Auto);
-                let _ = stderr.set_color(ColorSpec::new().set_fg(Some(Color::Rgb(100, 100, 100))));
-                let _ = writeln!(stderr, "Warning: Skipping {}: {}", path.display(), msg);
-                let _ = stderr.reset();
-                return Ok(TestResults::default());
-            }
-            Err(e) => {
-                return Err(RunnerError::ParseError(format!(
-                    "Failed to parse {}: {}",
-                    path.display(),
-                    e
-                )));
-            }
-        };
+        )
+        .map_err(|e| {
+            RunnerError::ParseError(format!("Failed to parse {}: {}", path.display(), e))
+        })?;
 
         let mut results = TestResults::default();
 
@@ -447,7 +428,7 @@ impl TestResults {
             let category = categorize_test(&failure.0, &failure.1);
             category_groups
                 .entry(category)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(failure);
         }
 

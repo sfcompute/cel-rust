@@ -1,7 +1,17 @@
 use prost::Message;
+use prost_reflect::{DescriptorPool, DynamicMessage};
 use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
+
+// Load the FileDescriptorSet generated at build time
+lazy_static::lazy_static! {
+    static ref DESCRIPTOR_POOL: DescriptorPool = {
+        let descriptor_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/file_descriptor_set.bin"));
+        DescriptorPool::decode(descriptor_bytes.as_ref())
+            .expect("Failed to load descriptor pool")
+    };
+}
 
 /// Find protoc's well-known types include directory
 fn find_protoc_include() -> Option<String> {
@@ -79,8 +89,37 @@ fn build_descriptor_set(
     Ok(descriptor_file)
 }
 
-/// Parse textproto using protoc to convert to binary format, then parse with prost
-pub fn parse_textproto_to_prost<T: Message + Default>(
+/// Parse textproto using prost-reflect (supports Any messages with type URLs)
+fn parse_with_prost_reflect<T: Message + Default>(
+    text: &str,
+    message_type: &str,
+) -> Result<T, TextprotoParseError> {
+    // Get the message descriptor from the pool
+    let message_desc = DESCRIPTOR_POOL
+        .get_message_by_name(message_type)
+        .ok_or_else(|| {
+            TextprotoParseError::DescriptorError(format!(
+                "Message type not found: {}",
+                message_type
+            ))
+        })?;
+
+    // Parse text format into DynamicMessage
+    let dynamic_msg = DynamicMessage::parse_text_format(message_desc, text)
+        .map_err(|e| TextprotoParseError::TextFormatError(e.to_string()))?;
+
+    // Encode DynamicMessage to binary
+    let mut buf = Vec::new();
+    dynamic_msg
+        .encode(&mut buf)
+        .map_err(|e| TextprotoParseError::EncodeError(e.to_string()))?;
+
+    // Decode binary into prost-generated type
+    T::decode(&buf[..]).map_err(TextprotoParseError::Decode)
+}
+
+/// Parse textproto using protoc to convert to binary format, then parse with prost (fallback)
+fn parse_with_protoc<T: Message + Default>(
     text: &str,
     message_type: &str,
     proto_files: &[&str],
@@ -116,12 +155,6 @@ pub fn parse_textproto_to_prost<T: Message + Default>(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // Check if this is an Any message resolution error
-        if stderr.contains("Could not find type") && stderr.contains("google.protobuf.Any") {
-            return Err(TextprotoParseError::AnyMessageUnsupported(
-                "protoc --encode does not support Any messages with type URLs. This test file will be skipped.".to_string(),
-            ));
-        }
         return Err(TextprotoParseError::ProtocError(format!(
             "protoc failed: {}",
             stderr
@@ -133,14 +166,38 @@ pub fn parse_textproto_to_prost<T: Message + Default>(
     Ok(message)
 }
 
+/// Parse textproto to prost type (tries prost-reflect first, falls back to protoc)
+pub fn parse_textproto_to_prost<T: Message + Default>(
+    text: &str,
+    message_type: &str,
+    proto_files: &[&str],
+    include_paths: &[&str],
+) -> Result<T, TextprotoParseError> {
+    // Try prost-reflect first (handles Any messages with type URLs)
+    match parse_with_prost_reflect(text, message_type) {
+        Ok(result) => return Ok(result),
+        Err(e) => {
+            // If prost-reflect fails, fall back to protoc for better error messages
+            eprintln!("prost-reflect parse failed: {}, trying protoc fallback", e);
+        }
+    }
+
+    // Fallback to protoc-based parsing
+    parse_with_protoc(text, message_type, proto_files, include_paths)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TextprotoParseError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Protoc error: {0}")]
     ProtocError(String),
-    #[error("Any message unsupported: {0}")]
-    AnyMessageUnsupported(String),
+    #[error("Descriptor error: {0}")]
+    DescriptorError(String),
+    #[error("Text format parse error: {0}")]
+    TextFormatError(String),
+    #[error("Encode error: {0}")]
+    EncodeError(String),
     #[error("Protobuf decode error: {0}")]
     Decode(#[from] prost::DecodeError),
 }
