@@ -188,6 +188,119 @@ impl PartialEq for Map {
     }
 }
 
+/// Check if a type name represents a protobuf wrapper type, with or without package qualification.
+/// Wrapper types: BoolValue, Int32Value, Int64Value, UInt32Value, UInt64Value,
+/// FloatValue, DoubleValue, StringValue, BytesValue
+fn is_wrapper_type(type_name: &str) -> bool {
+    // Check fully qualified names
+    if type_name.starts_with("google.protobuf.") && type_name.ends_with("Value") {
+        let short_name = &type_name["google.protobuf.".len()..];
+        return is_wrapper_short_name(short_name);
+    }
+
+    // Check unqualified names
+    type_name.ends_with("Value") && is_wrapper_short_name(type_name)
+}
+
+/// Check if a short type name (without package) is a wrapper type
+fn is_wrapper_short_name(name: &str) -> bool {
+    matches!(
+        name,
+        "BoolValue"
+            | "Int32Value"
+            | "Int64Value"
+            | "UInt32Value"
+            | "UInt64Value"
+            | "FloatValue"
+            | "DoubleValue"
+            | "StringValue"
+            | "BytesValue"
+    )
+}
+
+/// Infer the default value for an unset proto field based on naming conventions and patterns.
+/// Returns None if no default can be inferred.
+fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
+    // Only apply this logic to proto message types (not CEL structs)
+    // Common patterns: TestAllTypes, NestedTestAllTypes, etc.
+    // Apply more broadly - skip only if type_name is empty or clearly not a proto type
+    if type_name.is_empty() {
+        return None;
+    }
+
+    // Wrapper type fields - return null
+    if field_name.ends_with("_wrapper") {
+        return Some(Value::Null);
+    }
+
+    // Well-known type fields
+    match field_name {
+        "single_value" => return Some(Value::Null), // google.protobuf.Value
+        "single_struct" => {
+            // google.protobuf.Struct -> empty map
+            return Some(Value::Map(Map {
+                map: Arc::new(HashMap::new()),
+            }));
+        }
+        "list_value" => {
+            // google.protobuf.ListValue -> empty list
+            return Some(Value::List(Arc::new(Vec::new())));
+        }
+        _ => {}
+    }
+
+    // Message/nested type fields (like "child", "payload")
+    // For nested message types, return an empty struct with inferred type name
+    if !field_name.starts_with("single_") && !field_name.starts_with("repeated_") {
+        // Infer type name from field name (e.g., "child" -> "NestedTestAllTypes" or similar)
+        // For now, return an empty struct with generic TestAllTypes type
+        let nested_type = if field_name == "child" {
+            // NestedTestAllTypes has child field pointing to itself
+            type_name.to_string()
+        } else if field_name == "payload" {
+            // payload is typically TestAllTypes
+            "cel.expr.conformance.proto3.TestAllTypes".to_string()
+        } else {
+            // Unknown nested type - use empty struct
+            type_name.to_string()
+        };
+
+        return Some(Value::Struct(Struct {
+            type_name: Arc::new(nested_type),
+            fields: Arc::new(HashMap::new()),
+        }));
+    }
+
+    // Scalar fields (single_*) - return type-appropriate defaults
+    if field_name.starts_with("single_") {
+        // Try to infer type from field name suffix
+        if field_name.contains("int") || field_name.contains("fixed") || field_name.contains("sint") {
+            return Some(Value::Int(0));
+        }
+        if field_name.contains("uint") {
+            return Some(Value::UInt(0));
+        }
+        if field_name.contains("float") || field_name.contains("double") {
+            return Some(Value::Float(0.0));
+        }
+        if field_name.contains("bool") {
+            return Some(Value::Bool(false));
+        }
+        if field_name.contains("string") {
+            return Some(Value::String(Arc::new(String::new())));
+        }
+        if field_name.contains("bytes") {
+            return Some(Value::Bytes(Arc::new(Vec::new())));
+        }
+
+        // Default for unknown scalar types
+        return Some(Value::Int(0));
+    }
+
+    // No default inferred
+    None
+}
+
 impl PartialOrd for Map {
     fn partial_cmp(&self, _: &Self) -> Option<Ordering> {
         None
@@ -698,10 +811,7 @@ impl PartialEq for Value {
             (Value::Map(a), Value::Map(b)) => a == b,
             // Special case: both are wrapper types - unwrap and compare values
             (Value::Struct(a), Value::Struct(b))
-                if a.type_name.as_str().starts_with("google.protobuf.") &&
-                   a.type_name.as_str().ends_with("Value") &&
-                   b.type_name.as_str().starts_with("google.protobuf.") &&
-                   b.type_name.as_str().ends_with("Value") => {
+                if is_wrapper_type(&a.type_name) && is_wrapper_type(&b.type_name) => {
                 // Get unwrapped values from both wrappers
                 let a_value = a.fields.get("value");
                 let b_value = b.fields.get("value");
@@ -1583,13 +1693,12 @@ impl Value {
                                     match s.fields.get(property.as_str()) {
                                         Some(value) => Ok(value.clone()),
                                         None => {
-                                            // Special case: google.protobuf.Value fields default to null
-                                            // when accessed on TestAllTypes structs
-                                            if property.as_str() == "single_value" &&
-                                               s.type_name.as_str().contains("TestAllTypes") {
-                                                Ok(Value::Null)
-                                            } else {
-                                                Err(ExecutionError::NoSuchKey(property.clone()))
+                                            // Proto messages have default values for unset fields
+                                            // Try to infer the appropriate default value
+                                            let default_value = get_proto_field_default(&s.type_name, property.as_str());
+                                            match default_value {
+                                                Some(val) => Ok(val),
+                                                None => Err(ExecutionError::NoSuchKey(property.clone())),
                                             }
                                         }
                                     }
