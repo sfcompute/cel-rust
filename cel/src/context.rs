@@ -35,11 +35,13 @@ pub enum Context<'a> {
         functions: FunctionRegistry,
         variables: BTreeMap<String, Value>,
         resolver: Option<&'a dyn VariableResolver>,
+        container: Option<String>,
     },
     Child {
         parent: &'a Context<'a>,
         variables: BTreeMap<String, Value>,
         resolver: Option<&'a dyn VariableResolver>,
+        container: Option<String>,
     },
 }
 
@@ -90,6 +92,29 @@ impl<'a> Context<'a> {
         }
     }
 
+    /// Set the container prefix for type name qualification
+    pub fn set_container(&mut self, c: String) {
+        match self {
+            Context::Root { container, .. } => {
+                *container = Some(c);
+            }
+            Context::Child { container, .. } => {
+                *container = Some(c);
+            }
+        }
+    }
+
+    /// Get the container prefix for type name qualification
+    pub fn get_container(&self) -> Option<&str> {
+        match self {
+            Context::Root { container, .. } => container.as_deref(),
+            Context::Child { container, parent, .. } => {
+                // Child context can have its own container, or inherit from parent
+                container.as_deref().or_else(|| parent.get_container())
+            }
+        }
+    }
+
     pub fn get_variable<S>(&self, name: S) -> Result<Value, ExecutionError>
     where
         S: AsRef<str>,
@@ -100,6 +125,7 @@ impl<'a> Context<'a> {
                 variables,
                 parent,
                 resolver,
+                ..
             } => resolver
                 .and_then(|r| r.resolve(name))
                 .or_else(|| {
@@ -149,6 +175,7 @@ impl<'a> Context<'a> {
             parent: self,
             variables: Default::default(),
             resolver: None,
+            container: None,  // Child inherits container from parent via get_container()
         }
     }
 
@@ -168,6 +195,7 @@ impl<'a> Context<'a> {
             variables: Default::default(),
             functions: Default::default(),
             resolver: None,
+            container: None,
         }
     }
 }
@@ -178,6 +206,7 @@ impl Default for Context<'_> {
             variables: Default::default(),
             functions: Default::default(),
             resolver: None,
+            container: None,
         };
 
         ctx.add_function("contains", functions::contains);

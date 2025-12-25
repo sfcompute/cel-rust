@@ -301,6 +301,35 @@ fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
     None
 }
 
+/// Qualify a type name using the container context from the execution context.
+///
+/// Rules:
+/// 1. If type_name starts with '.', it's already absolute - return as-is (without the leading dot)
+/// 2. If type_name is fully qualified (contains '.'), return as-is
+/// 3. If context has a container and type_name is simple, prepend container
+/// 4. Otherwise, return type_name as-is
+fn qualify_type_name(type_name: &str, ctx: &crate::context::Context) -> String {
+    // Rule 1: Absolute type names start with '.'
+    if type_name.starts_with('.') {
+        return type_name[1..].to_string();
+    }
+
+    // Rule 2: Already qualified (contains '.')
+    if type_name.contains('.') {
+        return type_name.to_string();
+    }
+
+    // Rule 3: Qualify with container if available
+    if let Some(container) = ctx.get_container() {
+        if !container.is_empty() {
+            return format!("{}.{}", container, type_name);
+        }
+    }
+
+    // Rule 4: Return as-is
+    type_name.to_string()
+}
+
 impl PartialOrd for Map {
     fn partial_cmp(&self, _: &Self) -> Option<Ordering> {
         None
@@ -2362,8 +2391,11 @@ impl Value {
                         }
                     }
                 }
+                // Qualify the type name using container context if needed
+                let qualified_type_name = qualify_type_name(&struct_expr.type_name, ctx);
+
                 Value::Struct(Struct {
-                    type_name: Arc::new(struct_expr.type_name.clone()),
+                    type_name: Arc::new(qualified_type_name),
                     fields: Arc::new(fields),
                 })
                 .into()

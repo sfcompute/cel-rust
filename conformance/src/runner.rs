@@ -163,6 +163,11 @@ impl ConformanceRunner {
         // Build context with bindings
         let mut context = Context::default();
 
+        // Set container if present (for type name qualification)
+        if !test.container.is_empty() {
+            context.set_container(test.container.clone());
+        }
+
         // Prepare container resolver if needed (must be declared outside the block to live long enough)
         let mut variables_map = BTreeMap::new();
         let container = test.container.clone();
