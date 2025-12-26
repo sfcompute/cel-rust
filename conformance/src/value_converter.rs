@@ -69,7 +69,7 @@ pub fn proto_value_to_cel_value(proto_value: &ProtoValue) -> Result<CelValue, Co
 
 /// Converts a google.protobuf.Any message to a CEL value.
 /// Handles wrapper types and converts other messages to Structs.
-fn convert_any_to_cel_value(any: &Any) -> Result<CelValue, ConversionError> {
+pub fn convert_any_to_cel_value(any: &Any) -> Result<CelValue, ConversionError> {
     use cel::objects::Value::*;
 
     // Try to decode as wrapper types first
@@ -368,19 +368,27 @@ fn convert_any_to_cel_value(any: &Any) -> Result<CelValue, ConversionError> {
         }
     }
 
-    // Try to decode as TestAllTypes (proto2 or proto3)
+    // Handle nested Any messages (recursively unpack)
     use prost::Message;
+    if type_url.contains("google.protobuf.Any") {
+        if let Ok(inner_any) = Any::decode(&any.value[..]) {
+            // Recursively unpack the inner Any
+            return convert_any_to_cel_value(&inner_any);
+        }
+    }
+
+    // Try to decode as TestAllTypes (proto2 or proto3)
     if type_url.contains("cel.expr.conformance.proto3.TestAllTypes") {
         if let Ok(msg) =
             crate::proto::cel::expr::conformance::proto3::TestAllTypes::decode(&any.value[..])
         {
-            return convert_test_all_types_proto3_to_struct(&msg);
+            return convert_test_all_types_proto3_to_struct_with_bytes(&msg, &any.value);
         }
     } else if type_url.contains("cel.expr.conformance.proto2.TestAllTypes") {
         if let Ok(msg) =
             crate::proto::cel::expr::conformance::proto2::TestAllTypes::decode(&any.value[..])
         {
-            return convert_test_all_types_proto2_to_struct(&msg);
+            return convert_test_all_types_proto2_to_struct(&msg, &any.value);
         }
     }
 
@@ -390,6 +398,56 @@ fn convert_any_to_cel_value(any: &Any) -> Result<CelValue, ConversionError> {
         "proto message type: {} (not yet supported)",
         type_name
     )))
+}
+
+/// Extract extension fields from a protobuf message's wire format.
+/// Extension fields have field numbers >= 1000.
+fn extract_extension_fields(
+    encoded_msg: &[u8],
+    fields: &mut HashMap<String, CelValue>,
+) -> Result<(), ConversionError> {
+    use cel::proto_compare::{parse_proto_wire_format, field_value_to_cel};
+
+    // Parse wire format to get all fields
+    let field_map = match parse_proto_wire_format(encoded_msg) {
+        Some(map) => map,
+        None => return Ok(()), // No extension fields or parse failed
+    };
+
+    // Process extension fields (field numbers >= 1000)
+    for (field_num, values) in field_map {
+        if field_num >= 1000 {
+            // Map field number to fully qualified extension name
+            let ext_name = match field_num {
+                1000 => "cel.expr.conformance.proto2.int32_ext",
+                1001 => "cel.expr.conformance.proto2.nested_ext",
+                1002 => "cel.expr.conformance.proto2.test_all_types_ext",
+                1003 => "cel.expr.conformance.proto2.nested_enum_ext",
+                1004 => "cel.expr.conformance.proto2.repeated_test_all_types",
+                1005 => "cel.expr.conformance.proto2.Proto2ExtensionScopedMessage.int64_ext",
+                1006 => "cel.expr.conformance.proto2.Proto2ExtensionScopedMessage.message_scoped_nested_ext",
+                1007 => "cel.expr.conformance.proto2.Proto2ExtensionScopedMessage.nested_enum_ext",
+                1008 => "cel.expr.conformance.proto2.Proto2ExtensionScopedMessage.message_scoped_repeated_test_all_types",
+                _ => continue, // Unknown extension
+            };
+
+            // For repeated extensions (1004, 1008), create a List
+            if field_num == 1004 || field_num == 1008 {
+                let list_values: Vec<CelValue> = values.iter()
+                    .map(|v| field_value_to_cel(v))
+                    .collect();
+                fields.insert(ext_name.to_string(), CelValue::List(Arc::new(list_values)));
+            } else {
+                // For singular extensions, use the first (and only) value
+                if let Some(first_value) = values.first() {
+                    let cel_value = field_value_to_cel(first_value);
+                    fields.insert(ext_name.to_string(), cel_value);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Convert a google.protobuf.Value to a CEL Value
@@ -425,9 +483,101 @@ fn convert_protobuf_value_to_cel(value: &prost_types::Value) -> Result<CelValue,
     }
 }
 
-/// Convert a proto3 TestAllTypes message to a CEL Struct
+/// Parse oneof field from wire format if it's present but not decoded by prost
+/// Returns (field_name, cel_value) if found
+fn parse_oneof_from_wire_format(wire_bytes: &[u8]) -> Result<Option<(String, CelValue)>, ConversionError> {
+    use cel::proto_compare::parse_proto_wire_format;
+    use prost::Message;
+
+    // Parse wire format to get all fields
+    let field_map = match parse_proto_wire_format(wire_bytes) {
+        Some(map) => map,
+        None => return Ok(None),
+    };
+
+    // Check for oneof field 400 (oneof_type - NestedTestAllTypes)
+    if let Some(values) = field_map.get(&400) {
+        if let Some(first_value) = values.first() {
+            // Field 400 is a length-delimited message (NestedTestAllTypes)
+            if let cel::proto_compare::FieldValue::LengthDelimited(bytes) = first_value {
+                // Decode as NestedTestAllTypes
+                if let Ok(nested) = crate::proto::cel::expr::conformance::proto3::NestedTestAllTypes::decode(&bytes[..]) {
+                    // Convert NestedTestAllTypes to struct
+                    let mut nested_fields = HashMap::new();
+
+                    // Handle child field (recursive NestedTestAllTypes)
+                    if let Some(ref child) = nested.child {
+                        let mut child_fields = HashMap::new();
+                        if let Some(ref payload) = child.payload {
+                            let payload_struct = convert_test_all_types_proto3_to_struct(payload)?;
+                            child_fields.insert("payload".to_string(), payload_struct);
+                        }
+                        let child_struct = CelValue::Struct(cel::objects::Struct {
+                            type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
+                            fields: Arc::new(child_fields),
+                        });
+                        nested_fields.insert("child".to_string(), child_struct);
+                    }
+
+                    // Handle payload field (TestAllTypes)
+                    if let Some(ref payload) = nested.payload {
+                        let payload_struct = convert_test_all_types_proto3_to_struct(payload)?;
+                        nested_fields.insert("payload".to_string(), payload_struct);
+                    }
+
+                    let nested_struct = CelValue::Struct(cel::objects::Struct {
+                        type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
+                        fields: Arc::new(nested_fields),
+                    });
+                    return Ok(Some(("oneof_type".to_string(), nested_struct)));
+                }
+            }
+        }
+    }
+
+    // Check for oneof field 401 (oneof_msg - NestedMessage)
+    if let Some(values) = field_map.get(&401) {
+        if let Some(first_value) = values.first() {
+            if let cel::proto_compare::FieldValue::LengthDelimited(bytes) = first_value {
+                if let Ok(nested) = crate::proto::cel::expr::conformance::proto3::test_all_types::NestedMessage::decode(&bytes[..]) {
+                    let mut nested_fields = HashMap::new();
+                    nested_fields.insert("bb".to_string(), CelValue::Int(nested.bb as i64));
+                    let nested_struct = CelValue::Struct(cel::objects::Struct {
+                        type_name: Arc::new("cel.expr.conformance.proto3.NestedMessage".to_string()),
+                        fields: Arc::new(nested_fields),
+                    });
+                    return Ok(Some(("oneof_msg".to_string(), nested_struct)));
+                }
+            }
+        }
+    }
+
+    // Check for oneof field 402 (oneof_bool - bool)
+    if let Some(values) = field_map.get(&402) {
+        if let Some(first_value) = values.first() {
+            if let cel::proto_compare::FieldValue::Varint(v) = first_value {
+                return Ok(Some(("oneof_bool".to_string(), CelValue::Bool(*v != 0))));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Convert a proto3 TestAllTypes message to a CEL Struct (wrapper without bytes)
 fn convert_test_all_types_proto3_to_struct(
     msg: &crate::proto::cel::expr::conformance::proto3::TestAllTypes,
+) -> Result<CelValue, ConversionError> {
+    use prost::Message;
+    let mut bytes = Vec::new();
+    msg.encode(&mut bytes).map_err(|e| ConversionError::Unsupported(format!("Failed to encode: {}", e)))?;
+    convert_test_all_types_proto3_to_struct_with_bytes(msg, &bytes)
+}
+
+/// Convert a proto3 TestAllTypes message to a CEL Struct
+fn convert_test_all_types_proto3_to_struct_with_bytes(
+    msg: &crate::proto::cel::expr::conformance::proto3::TestAllTypes,
+    original_bytes: &[u8],
 ) -> Result<CelValue, ConversionError> {
     use cel::objects::{Struct, Value::*};
     use std::sync::Arc;
@@ -505,6 +655,57 @@ fn convert_test_all_types_proto3_to_struct(
     // Handle standalone_enum field (proto3 enums are not optional)
     fields.insert("standalone_enum".to_string(), Int(msg.standalone_enum as i64));
 
+    // Handle oneof field (kind)
+    if let Some(ref kind) = msg.kind {
+        use crate::proto::cel::expr::conformance::proto3::test_all_types::Kind;
+        match kind {
+            Kind::OneofType(nested) => {
+                // Convert NestedTestAllTypes - has child and payload fields
+                let mut nested_fields = HashMap::new();
+
+                // Handle child field (recursive NestedTestAllTypes)
+                if let Some(ref child) = nested.child {
+                    // Recursively convert child (simplified for now - just handle payload)
+                    let mut child_fields = HashMap::new();
+                    if let Some(ref payload) = child.payload {
+                        let payload_struct = convert_test_all_types_proto3_to_struct(payload)?;
+                        child_fields.insert("payload".to_string(), payload_struct);
+                    }
+                    let child_struct = Struct(Struct {
+                        type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
+                        fields: Arc::new(child_fields),
+                    });
+                    nested_fields.insert("child".to_string(), child_struct);
+                }
+
+                // Handle payload field (TestAllTypes)
+                if let Some(ref payload) = nested.payload {
+                    let payload_struct = convert_test_all_types_proto3_to_struct(payload)?;
+                    nested_fields.insert("payload".to_string(), payload_struct);
+                }
+
+                let nested_struct = Struct(Struct {
+                    type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
+                    fields: Arc::new(nested_fields),
+                });
+                fields.insert("oneof_type".to_string(), nested_struct);
+            }
+            Kind::OneofMsg(nested) => {
+                // Convert NestedMessage to struct
+                let mut nested_fields = HashMap::new();
+                nested_fields.insert("bb".to_string(), Int(nested.bb as i64));
+                let nested_struct = Struct(Struct {
+                    type_name: Arc::new("cel.expr.conformance.proto3.NestedMessage".to_string()),
+                    fields: Arc::new(nested_fields),
+                });
+                fields.insert("oneof_msg".to_string(), nested_struct);
+            }
+            Kind::OneofBool(b) => {
+                fields.insert("oneof_bool".to_string(), Bool(*b));
+            }
+        }
+    }
+
     // Handle optional message fields (well-known types)
     if let Some(ref struct_val) = msg.single_struct {
         // Convert google.protobuf.Struct to CEL Map
@@ -532,6 +733,18 @@ fn convert_test_all_types_proto3_to_struct(
         fields.insert("single_timestamp".to_string(), Timestamp(fixed_offset));
     }
 
+    // Handle single_any field
+    if let Some(ref any) = msg.single_any {
+        match convert_any_to_cel_value(any) {
+            Ok(cel_value) => {
+                fields.insert("single_any".to_string(), cel_value);
+            }
+            Err(_) => {
+                fields.insert("single_any".to_string(), CelValue::Null);
+            }
+        }
+    }
+
     if let Some(ref duration) = msg.single_duration {
         // Convert google.protobuf.Duration to CEL Duration
         use chrono::Duration as ChronoDuration;
@@ -554,6 +767,24 @@ fn convert_test_all_types_proto3_to_struct(
         fields.insert("list_value".to_string(), List(Arc::new(list_items)));
     }
 
+    // If oneof field wasn't set by prost decoding, try to parse it manually from wire format
+    // This handles cases where prost-reflect encoding loses oneof information
+    if msg.kind.is_none() {
+        if let Some((field_name, oneof_value)) = parse_oneof_from_wire_format(original_bytes)? {
+            fields.insert(field_name, oneof_value);
+        }
+    }
+
+    // Filter out reserved keyword fields (fields 500-516) that were formerly CEL reserved identifiers
+    // These should not be exposed in the CEL representation
+    let reserved_keywords = [
+        "as", "break", "const", "continue", "else", "for", "function", "if",
+        "import", "let", "loop", "package", "namespace", "return", "var", "void", "while"
+    ];
+    for keyword in &reserved_keywords {
+        fields.remove(*keyword);
+    }
+
     Ok(Struct(Struct {
         type_name: Arc::new("cel.expr.conformance.proto3.TestAllTypes".to_string()),
         fields: Arc::new(fields),
@@ -563,6 +794,7 @@ fn convert_test_all_types_proto3_to_struct(
 /// Convert a proto2 TestAllTypes message to a CEL Struct
 fn convert_test_all_types_proto2_to_struct(
     msg: &crate::proto::cel::expr::conformance::proto2::TestAllTypes,
+    original_bytes: &[u8],
 ) -> Result<CelValue, ConversionError> {
     use cel::objects::{Struct, Value::*};
     use std::sync::Arc;
@@ -659,6 +891,57 @@ fn convert_test_all_types_proto2_to_struct(
         fields.insert("standalone_enum".to_string(), Int(e as i64));
     }
 
+    // Handle oneof field (kind) - proto2 version
+    if let Some(ref kind) = msg.kind {
+        use crate::proto::cel::expr::conformance::proto2::test_all_types::Kind;
+        match kind {
+            Kind::OneofType(nested) => {
+                // Convert NestedTestAllTypes - has child and payload fields
+                let mut nested_fields = HashMap::new();
+
+                // Handle child field (recursive NestedTestAllTypes)
+                if let Some(ref child) = nested.child {
+                    // Recursively convert child (simplified for now - just handle payload)
+                    let mut child_fields = HashMap::new();
+                    if let Some(ref payload) = child.payload {
+                        let payload_struct = convert_test_all_types_proto2_to_struct(payload, &[])?;
+                        child_fields.insert("payload".to_string(), payload_struct);
+                    }
+                    let child_struct = Struct(Struct {
+                        type_name: Arc::new("cel.expr.conformance.proto2.NestedTestAllTypes".to_string()),
+                        fields: Arc::new(child_fields),
+                    });
+                    nested_fields.insert("child".to_string(), child_struct);
+                }
+
+                // Handle payload field (TestAllTypes)
+                if let Some(ref payload) = nested.payload {
+                    let payload_struct = convert_test_all_types_proto2_to_struct(payload, &[])?;
+                    nested_fields.insert("payload".to_string(), payload_struct);
+                }
+
+                let nested_struct = Struct(Struct {
+                    type_name: Arc::new("cel.expr.conformance.proto2.NestedTestAllTypes".to_string()),
+                    fields: Arc::new(nested_fields),
+                });
+                fields.insert("oneof_type".to_string(), nested_struct);
+            }
+            Kind::OneofMsg(nested) => {
+                // Convert NestedMessage to struct
+                let mut nested_fields = HashMap::new();
+                nested_fields.insert("bb".to_string(), Int(nested.bb.unwrap_or(0) as i64));
+                let nested_struct = Struct(Struct {
+                    type_name: Arc::new("cel.expr.conformance.proto2.NestedMessage".to_string()),
+                    fields: Arc::new(nested_fields),
+                });
+                fields.insert("oneof_msg".to_string(), nested_struct);
+            }
+            Kind::OneofBool(b) => {
+                fields.insert("oneof_bool".to_string(), Bool(*b));
+            }
+        }
+    }
+
     // Handle optional message fields (well-known types)
     if let Some(ref struct_val) = msg.single_struct {
         // Convert google.protobuf.Struct to CEL Map
@@ -685,6 +968,18 @@ fn convert_test_all_types_proto2_to_struct(
         fields.insert("single_timestamp".to_string(), Timestamp(fixed_offset));
     }
 
+    // Handle single_any field
+    if let Some(ref any) = msg.single_any {
+        match convert_any_to_cel_value(any) {
+            Ok(cel_value) => {
+                fields.insert("single_any".to_string(), cel_value);
+            }
+            Err(_) => {
+                fields.insert("single_any".to_string(), CelValue::Null);
+            }
+        }
+    }
+
     if let Some(ref duration) = msg.single_duration {
         // Convert google.protobuf.Duration to CEL Duration
         use chrono::Duration as ChronoDuration;
@@ -705,6 +1000,19 @@ fn convert_test_all_types_proto2_to_struct(
             list_items.push(convert_protobuf_value_to_cel(item)?);
         }
         fields.insert("list_value".to_string(), List(Arc::new(list_items)));
+    }
+
+    // Before returning the struct, extract extension fields from wire format
+    extract_extension_fields(original_bytes, &mut fields)?;
+
+    // Filter out reserved keyword fields (fields 500-516) that were formerly CEL reserved identifiers
+    // These should not be exposed in the CEL representation
+    let reserved_keywords = [
+        "as", "break", "const", "continue", "else", "for", "function", "if",
+        "import", "let", "loop", "package", "namespace", "return", "var", "void", "while"
+    ];
+    for keyword in &reserved_keywords {
+        fields.remove(*keyword);
     }
 
     Ok(Struct(Struct {

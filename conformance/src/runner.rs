@@ -690,6 +690,29 @@ fn unwrap_wrapper_if_needed(value: CelValue) -> CelValue {
             // Check if this is a wrapper type
             let type_name = s.type_name.as_str();
 
+            // Check if it's google.protobuf.Any and unpack it
+            if type_name == "google.protobuf.Any" {
+                // Extract type_url and value fields
+                if let (Some(CelValue::String(type_url)), Some(CelValue::Bytes(value_bytes))) =
+                    (s.fields.get("type_url"), s.fields.get("value"))
+                {
+                    // Create an Any message from the fields
+                    use prost_types::Any;
+                    let any = Any {
+                        type_url: type_url.to_string(),
+                        value: value_bytes.to_vec(),
+                    };
+
+                    // Try to unpack the Any to the actual type
+                    if let Ok(unpacked) = crate::value_converter::convert_any_to_cel_value(&any) {
+                        return unpacked;
+                    }
+                }
+
+                // If unpacking fails, return the Any struct as-is
+                return CelValue::Struct(s);
+            }
+
             // Check if it's a Google protobuf wrapper type
             if !type_name.starts_with("google.protobuf.") || !type_name.ends_with("Value") {
                 return CelValue::Struct(s);
