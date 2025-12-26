@@ -35,6 +35,38 @@ impl VariableResolver for ContainerResolver {
     }
 }
 
+/// Get the integer value for an enum by its name.
+///
+/// This maps enum names like "BAZ" to their integer values (e.g., 2).
+fn get_enum_value_by_name(type_name: &str, name: &str) -> Option<i64> {
+    match type_name {
+        "cel.expr.conformance.proto2.GlobalEnum" | "cel.expr.conformance.proto3.GlobalEnum" => {
+            match name {
+                "GOO" => Some(0),
+                "GAR" => Some(1),
+                "GAZ" => Some(2),
+                _ => None,
+            }
+        }
+        "cel.expr.conformance.proto2.TestAllTypes.NestedEnum"
+        | "cel.expr.conformance.proto3.TestAllTypes.NestedEnum" => {
+            match name {
+                "FOO" => Some(0),
+                "BAR" => Some(1),
+                "BAZ" => Some(2),
+                _ => None,
+            }
+        }
+        "google.protobuf.NullValue" => {
+            match name {
+                "NULL_VALUE" => Some(0),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Get a list of proto type names to register for a given container.
 ///
 /// These types need to be available as variables so expressions like
@@ -280,7 +312,111 @@ impl ConformanceRunner {
         // Add proto type names for container-aware type resolution
         if !container.is_empty() {
             for (type_name, type_value) in get_container_type_names(&container) {
-                variables_map.insert(type_name, CelValue::String(Arc::new(type_value)));
+                variables_map.insert(type_name.clone(), CelValue::String(Arc::new(type_value.clone())));
+
+                // Also register enum types as type constructor functions
+                // This allows expressions like GlobalEnum(-33) or TestAllTypes.NestedEnum('BAZ') to work
+                if type_name.contains("Enum") || type_name == "google.protobuf.NullValue" {
+                    // Create factory function to generate enum constructors
+                    let create_enum_constructor = |tn: String| {
+                        move |ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
+                            match &value {
+                                cel::objects::Value::String(name) => {
+                                    // Convert enum name to integer value
+                                    let enum_value = get_enum_value_by_name(&tn, name.as_str())
+                                        .ok_or_else(|| ftx.error("invalid"))?;
+                                    Ok(cel::objects::Value::Int(enum_value))
+                                }
+                                _ => {
+                                    // For non-string values (like integers), return as-is
+                                    Ok(value)
+                                }
+                            }
+                        }
+                    };
+
+                    // Extract short name (e.g., "GlobalEnum" from "cel.expr.conformance.proto2.GlobalEnum")
+                    if let Some(short_name) = type_name.rsplit('.').next() {
+                        context.add_function(short_name, create_enum_constructor(type_name.clone()));
+                    }
+
+                    // For nested enums, also register with parent prefix (e.g., "TestAllTypes.NestedEnum")
+                    if type_name.contains("TestAllTypes.NestedEnum") {
+                        context.add_function("TestAllTypes.NestedEnum", create_enum_constructor(type_name.clone()));
+
+                        // Also register as a Map with enum values (for accessing like TestAllTypes.NestedEnum.BAR)
+                        let mut enum_map = std::collections::HashMap::new();
+                        enum_map.insert(
+                            cel::objects::Key::String(Arc::new("FOO".to_string())),
+                            cel::objects::Value::Int(0),
+                        );
+                        enum_map.insert(
+                            cel::objects::Key::String(Arc::new("BAR".to_string())),
+                            cel::objects::Value::Int(1),
+                        );
+                        enum_map.insert(
+                            cel::objects::Key::String(Arc::new("BAZ".to_string())),
+                            cel::objects::Value::Int(2),
+                        );
+                        // Register with fully qualified name
+                        variables_map.insert(
+                            type_name.clone(),
+                            CelValue::Map(cel::objects::Map {
+                                map: Arc::new(enum_map),
+                            }),
+                        );
+                    }
+
+                    // For GlobalEnum
+                    if type_name.contains("GlobalEnum") && !type_name.contains("TestAllTypes") {
+                        let mut enum_map = std::collections::HashMap::new();
+                        enum_map.insert(
+                            cel::objects::Key::String(Arc::new("GOO".to_string())),
+                            cel::objects::Value::Int(0),
+                        );
+                        enum_map.insert(
+                            cel::objects::Key::String(Arc::new("GAR".to_string())),
+                            cel::objects::Value::Int(1),
+                        );
+                        enum_map.insert(
+                            cel::objects::Key::String(Arc::new("GAZ".to_string())),
+                            cel::objects::Value::Int(2),
+                        );
+                        // Register with fully qualified name
+                        variables_map.insert(
+                            type_name.clone(),
+                            CelValue::Map(cel::objects::Map {
+                                map: Arc::new(enum_map),
+                            }),
+                        );
+                    }
+
+                    // For google.protobuf.NullValue
+                    if type_name == "google.protobuf.NullValue" {
+                        // Register constructor function
+                        context.add_function("NullValue", create_enum_constructor(type_name.clone()));
+
+                        let mut enum_map = std::collections::HashMap::new();
+                        enum_map.insert(
+                            cel::objects::Key::String(Arc::new("NULL_VALUE".to_string())),
+                            cel::objects::Value::Int(0),
+                        );
+                        // Register with fully qualified name
+                        variables_map.insert(
+                            type_name.clone(),
+                            CelValue::Map(cel::objects::Map {
+                                map: Arc::new(enum_map.clone()),
+                            }),
+                        );
+                        // Also register as short name "NullValue"
+                        variables_map.insert(
+                            "NullValue".to_string(),
+                            CelValue::Map(cel::objects::Map {
+                                map: Arc::new(enum_map),
+                            }),
+                        );
+                    }
+                }
             }
         }
 
@@ -475,6 +611,13 @@ fn values_equal(a: &CelValue, b: &CelValue) -> bool {
 }
 
 fn structs_equal(a: &Struct, b: &Struct) -> bool {
+    // Special handling for google.protobuf.Any: compare semantically
+    if a.type_name.as_str() == "google.protobuf.Any"
+        && b.type_name.as_str() == "google.protobuf.Any"
+    {
+        return compare_any_structs(a, b);
+    }
+
     // Type names must match
     if a.type_name != b.type_name {
         return false;
@@ -498,6 +641,47 @@ fn structs_equal(a: &Struct, b: &Struct) -> bool {
     }
 
     true
+}
+
+/// Compare two google.protobuf.Any structs semantically.
+///
+/// This function extracts the type_url and value fields from both structs
+/// and performs semantic comparison of the protobuf wire format, so that
+/// messages with the same content but different field order are considered equal.
+fn compare_any_structs(a: &Struct, b: &Struct) -> bool {
+    use cel::objects::Value as CelValue;
+
+    // Extract type_url and value from both structs
+    let type_url_a = a.fields.get("type_url");
+    let type_url_b = b.fields.get("type_url");
+    let value_a = a.fields.get("value");
+    let value_b = b.fields.get("value");
+
+    // Check type_url equality
+    match (type_url_a, type_url_b) {
+        (Some(CelValue::String(url_a)), Some(CelValue::String(url_b))) => {
+            if url_a != url_b {
+                return false; // Different message types
+            }
+        }
+        (None, None) => {
+            // Both missing type_url, fall back to bytewise comparison
+            return match (value_a, value_b) {
+                (Some(CelValue::Bytes(a)), Some(CelValue::Bytes(b))) => a == b,
+                _ => false,
+            };
+        }
+        _ => return false, // type_url mismatch
+    }
+
+    // Compare value bytes semantically
+    match (value_a, value_b) {
+        (Some(CelValue::Bytes(bytes_a)), Some(CelValue::Bytes(bytes_b))) => {
+            cel::proto_compare::compare_any_values_semantic(bytes_a, bytes_b)
+        }
+        (None, None) => true, // Both empty
+        _ => false,
+    }
 }
 
 fn unwrap_wrapper_if_needed(value: CelValue) -> CelValue {

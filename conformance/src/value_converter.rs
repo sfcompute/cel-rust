@@ -333,6 +333,41 @@ fn convert_any_to_cel_value(any: &Any) -> Result<CelValue, ConversionError> {
         type_url
     };
 
+    // Handle google.protobuf.ListValue - return a list
+    if type_url.contains("google.protobuf.ListValue") {
+        use prost::Message;
+        if let Ok(list_value) = prost_types::ListValue::decode(&any.value[..]) {
+            let mut values = Vec::new();
+            for item in &list_value.values {
+                values.push(convert_protobuf_value_to_cel(item)?);
+            }
+            return Ok(List(Arc::new(values)));
+        }
+    }
+
+    // Handle google.protobuf.Struct - return a map
+    if type_url.contains("google.protobuf.Struct") {
+        use prost::Message;
+        if let Ok(struct_val) = prost_types::Struct::decode(&any.value[..]) {
+            let mut map_entries = HashMap::new();
+            for (key, value) in &struct_val.fields {
+                let cel_value = convert_protobuf_value_to_cel(value)?;
+                map_entries.insert(cel::objects::Key::String(Arc::new(key.clone())), cel_value);
+            }
+            return Ok(Map(cel::objects::Map {
+                map: Arc::new(map_entries),
+            }));
+        }
+    }
+
+    // Handle google.protobuf.Value - return the appropriate CEL value
+    if type_url.contains("google.protobuf.Value") {
+        use prost::Message;
+        if let Ok(value) = prost_types::Value::decode(&any.value[..]) {
+            return convert_protobuf_value_to_cel(&value);
+        }
+    }
+
     // Try to decode as TestAllTypes (proto2 or proto3)
     use prost::Message;
     if type_url.contains("cel.expr.conformance.proto3.TestAllTypes") {
@@ -355,6 +390,39 @@ fn convert_any_to_cel_value(any: &Any) -> Result<CelValue, ConversionError> {
         "proto message type: {} (not yet supported)",
         type_name
     )))
+}
+
+/// Convert a google.protobuf.Value to a CEL Value
+fn convert_protobuf_value_to_cel(value: &prost_types::Value) -> Result<CelValue, ConversionError> {
+    use cel::objects::{Key, Map, Value::*};
+    use prost_types::value::Kind;
+
+    match &value.kind {
+        Some(Kind::NullValue(_)) => Ok(Null),
+        Some(Kind::NumberValue(n)) => Ok(Float(*n)),
+        Some(Kind::StringValue(s)) => Ok(String(Arc::new(s.clone()))),
+        Some(Kind::BoolValue(b)) => Ok(Bool(*b)),
+        Some(Kind::StructValue(s)) => {
+            // Convert Struct to Map
+            let mut map_entries = HashMap::new();
+            for (key, val) in &s.fields {
+                let cel_val = convert_protobuf_value_to_cel(val)?;
+                map_entries.insert(Key::String(Arc::new(key.clone())), cel_val);
+            }
+            Ok(Map(Map {
+                map: Arc::new(map_entries),
+            }))
+        }
+        Some(Kind::ListValue(l)) => {
+            // Convert ListValue to List
+            let mut list_items = Vec::new();
+            for item in &l.values {
+                list_items.push(convert_protobuf_value_to_cel(item)?);
+            }
+            Ok(List(Arc::new(list_items)))
+        }
+        None => Ok(Null),
+    }
 }
 
 /// Convert a proto3 TestAllTypes message to a CEL Struct
@@ -433,6 +501,58 @@ fn convert_test_all_types_proto3_to_struct(
     fields.insert("single_uint64".to_string(), UInt(msg.single_uint64));
     fields.insert("single_float".to_string(), Float(msg.single_float as f64));
     fields.insert("single_double".to_string(), Float(msg.single_double));
+
+    // Handle standalone_enum field (proto3 enums are not optional)
+    fields.insert("standalone_enum".to_string(), Int(msg.standalone_enum as i64));
+
+    // Handle optional message fields (well-known types)
+    if let Some(ref struct_val) = msg.single_struct {
+        // Convert google.protobuf.Struct to CEL Map
+        let mut map_entries = HashMap::new();
+        for (key, value) in &struct_val.fields {
+            // Convert prost_types::Value to CEL Value
+            let cel_value = convert_protobuf_value_to_cel(value)?;
+            map_entries.insert(cel::objects::Key::String(Arc::new(key.clone())), cel_value);
+        }
+        fields.insert(
+            "single_struct".to_string(),
+            cel::objects::Value::Map(cel::objects::Map {
+                map: Arc::new(map_entries),
+            }),
+        );
+    }
+
+    if let Some(ref timestamp) = msg.single_timestamp {
+        // Convert google.protobuf.Timestamp to CEL Timestamp
+        use chrono::{DateTime, TimeZone, Utc};
+        let ts = Utc.timestamp_opt(timestamp.seconds, timestamp.nanos as u32)
+            .single()
+            .ok_or_else(|| ConversionError::Unsupported("Invalid timestamp".to_string()))?;
+        let fixed_offset = DateTime::from_naive_utc_and_offset(ts.naive_utc(), chrono::FixedOffset::east_opt(0).unwrap());
+        fields.insert("single_timestamp".to_string(), Timestamp(fixed_offset));
+    }
+
+    if let Some(ref duration) = msg.single_duration {
+        // Convert google.protobuf.Duration to CEL Duration
+        use chrono::Duration as ChronoDuration;
+        let dur = ChronoDuration::seconds(duration.seconds) + ChronoDuration::nanoseconds(duration.nanos as i64);
+        fields.insert("single_duration".to_string(), Duration(dur));
+    }
+
+    if let Some(ref value) = msg.single_value {
+        // Convert google.protobuf.Value to CEL Value
+        let cel_value = convert_protobuf_value_to_cel(value)?;
+        fields.insert("single_value".to_string(), cel_value);
+    }
+
+    if let Some(ref list_value) = msg.list_value {
+        // Convert google.protobuf.ListValue to CEL List
+        let mut list_items = Vec::new();
+        for item in &list_value.values {
+            list_items.push(convert_protobuf_value_to_cel(item)?);
+        }
+        fields.insert("list_value".to_string(), List(Arc::new(list_items)));
+    }
 
     Ok(Struct(Struct {
         type_name: Arc::new("cel.expr.conformance.proto3.TestAllTypes".to_string()),
@@ -532,6 +652,59 @@ fn convert_test_all_types_proto2_to_struct(
     }
     if let Some(d) = msg.single_double {
         fields.insert("single_double".to_string(), Float(d));
+    }
+
+    // Handle standalone_enum field
+    if let Some(e) = msg.standalone_enum {
+        fields.insert("standalone_enum".to_string(), Int(e as i64));
+    }
+
+    // Handle optional message fields (well-known types)
+    if let Some(ref struct_val) = msg.single_struct {
+        // Convert google.protobuf.Struct to CEL Map
+        let mut map_entries = HashMap::new();
+        for (key, value) in &struct_val.fields {
+            let cel_value = convert_protobuf_value_to_cel(value)?;
+            map_entries.insert(cel::objects::Key::String(Arc::new(key.clone())), cel_value);
+        }
+        fields.insert(
+            "single_struct".to_string(),
+            cel::objects::Value::Map(cel::objects::Map {
+                map: Arc::new(map_entries),
+            }),
+        );
+    }
+
+    if let Some(ref timestamp) = msg.single_timestamp {
+        // Convert google.protobuf.Timestamp to CEL Timestamp
+        use chrono::{DateTime, TimeZone, Utc};
+        let ts = Utc.timestamp_opt(timestamp.seconds, timestamp.nanos as u32)
+            .single()
+            .ok_or_else(|| ConversionError::Unsupported("Invalid timestamp".to_string()))?;
+        let fixed_offset = DateTime::from_naive_utc_and_offset(ts.naive_utc(), chrono::FixedOffset::east_opt(0).unwrap());
+        fields.insert("single_timestamp".to_string(), Timestamp(fixed_offset));
+    }
+
+    if let Some(ref duration) = msg.single_duration {
+        // Convert google.protobuf.Duration to CEL Duration
+        use chrono::Duration as ChronoDuration;
+        let dur = ChronoDuration::seconds(duration.seconds) + ChronoDuration::nanoseconds(duration.nanos as i64);
+        fields.insert("single_duration".to_string(), Duration(dur));
+    }
+
+    if let Some(ref value) = msg.single_value {
+        // Convert google.protobuf.Value to CEL Value
+        let cel_value = convert_protobuf_value_to_cel(value)?;
+        fields.insert("single_value".to_string(), cel_value);
+    }
+
+    if let Some(ref list_value) = msg.list_value {
+        // Convert google.protobuf.ListValue to CEL List
+        let mut list_items = Vec::new();
+        for item in &list_value.values {
+            list_items.push(convert_protobuf_value_to_cel(item)?);
+        }
+        fields.insert("list_value".to_string(), List(Arc::new(list_items)));
     }
 
     Ok(Struct(Struct {

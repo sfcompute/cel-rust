@@ -690,12 +690,15 @@ impl gen::CELVisitorCompat<'_> for Parser {
                 IdedExpr::default()
             }
             Some(member) => {
-                if ctx.ops.len() % 2 == 0 {
-                    self.visit(member.as_ref());
-                }
-                let op_id = self.helper.next_id(&ctx.ops[0]);
                 let target = self.visit(member.as_ref());
-                self.global_call_or_macro(op_id, operators::LOGICAL_NOT.to_string(), vec![target])
+                // If even number of NOT operations, return value unchanged
+                if ctx.ops.len() % 2 == 0 {
+                    target
+                } else {
+                    // If odd number of NOT operations, apply one NOT
+                    let op_id = self.helper.next_id(&ctx.ops[0]);
+                    self.global_call_or_macro(op_id, operators::LOGICAL_NOT.to_string(), vec![target])
+                }
             }
         }
     }
@@ -706,12 +709,15 @@ impl gen::CELVisitorCompat<'_> for Parser {
                 self.report_error::<ParseError, _>(&ctx.start(), None, "No `MemberContextAll`!")
             }
             Some(member) => {
-                if ctx.ops.len() % 2 == 0 {
-                    self.visit(member.as_ref());
-                }
-                let op_id = self.helper.next_id(&ctx.ops[0]);
                 let target = self.visit(member.as_ref());
-                self.global_call_or_macro(op_id, operators::NEGATE.to_string(), vec![target])
+                // If even number of negations, return value unchanged
+                if ctx.ops.len() % 2 == 0 {
+                    target
+                } else {
+                    // If odd number of negations, apply one negation
+                    let op_id = self.helper.next_id(&ctx.ops[0]);
+                    self.global_call_or_macro(op_id, operators::NEGATE.to_string(), vec![target])
+                }
             }
         }
     }
@@ -1018,11 +1024,14 @@ impl gen::CELVisitorCompat<'_> for Parser {
             let string = ctx.get_text();
 
             // Check if this is triple-quoted (need to check before slicing off 'b')
-            // Patterns: b''' b""" br''' br""" bR''' bR"""
+            // Patterns: b''' b""" br''' br""" bR''' bR""" B''' B""" Br''' Br""" BR''' BR"""
             let is_triple = string.len() > 6 &&
                             (string.starts_with("b'''") || string.starts_with("b\"\"\"") ||
                              string.starts_with("br'''") || string.starts_with("br\"\"\"") ||
-                             string.starts_with("bR'''") || string.starts_with("bR\"\"\""));
+                             string.starts_with("bR'''") || string.starts_with("bR\"\"\"") ||
+                             string.starts_with("B'''") || string.starts_with("B\"\"\"") ||
+                             string.starts_with("Br'''") || string.starts_with("Br\"\"\"") ||
+                             string.starts_with("BR'''") || string.starts_with("BR\"\"\""));
 
             // Check if this is a raw bytes literal (br'...' or bR'...')
             let is_raw = string.len() > 2 && (string.chars().nth(1) == Some('r') || string.chars().nth(1) == Some('R'));
@@ -1032,12 +1041,23 @@ impl gen::CELVisitorCompat<'_> for Parser {
             } else if is_triple {
                 4  // Skip 'b' and opening ''' for triple-quoted bytes (b''')
             } else {
-                2  // Skip 'b' and first quote for regular bytes
+                1  // Skip only 'b', keep quotes for parse_bytes (so it doesn't mistake content for raw prefix)
             };
 
-            let end_offset = if is_triple { 3 } else { 1 };
+            // For raw bytes, don't strip the closing quote - parse_bytes handles it
+            // For non-raw single-quoted, keep quotes for parse_bytes
+            // For non-raw triple-quoted, strip triple quotes (parse_bytes will handle content)
+            let end_offset = if is_raw {
+                0  // Keep closing quote(s) for parse_bytes to handle
+            } else if is_triple {
+                3  // Remove closing ''' for non-raw triple-quoted
+            } else {
+                0  // Keep closing quote for parse_bytes
+            };
 
-            match parse::parse_bytes(&string[start_index..string.len() - end_offset]) {
+            let to_parse = &string[start_index..string.len() - end_offset];
+
+            match parse::parse_bytes(to_parse) {
                 Ok(bytes) => self
                     .helper
                     .next_expr(token, Expr::Literal(CelVal::Bytes(bytes))),

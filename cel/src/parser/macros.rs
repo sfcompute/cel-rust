@@ -25,6 +25,9 @@ pub fn find_expander(
         }
         operators::FILTER if args.len() == 2 && target.is_some() => Some(filter_macro_expander),
         operators::BIND if args.len() == 3 && target.is_some() => Some(bind_macro_expander),
+        "block" if args.len() == 2 && target.is_some() => Some(block_macro_expander),
+        "index" if args.len() == 1 && target.is_some() => Some(index_macro_expander),
+        "iterVar" if args.len() == 2 && target.is_some() => Some(iter_var_macro_expander),
         _ => None,
     }
 }
@@ -403,6 +406,185 @@ fn bind_macro_expander(
         init,
         result,
     }))))
+}
+
+fn block_macro_expander(
+    helper: &mut MacroExprHelper,
+    target: Option<IdedExpr>,
+    mut args: Vec<IdedExpr>,
+) -> Result<IdedExpr, ParseError> {
+    if target.is_none() {
+        unreachable!("Expected a target (cel), but got `None`!")
+    }
+    if args.len() != 2 {
+        unreachable!("Expected two args!")
+    }
+
+    // Validate that target is the identifier "cel"
+    let target = target.unwrap();
+    match &target.expr {
+        Expr::Ident(name) if name == "cel" => {
+            // Valid cel.block(...) call
+        }
+        _ => {
+            return Err(ParseError {
+                source: None,
+                pos: helper.pos_for(target.id).unwrap_or_default(),
+                msg: "block macro must be called as cel.block(...)".to_string(),
+                expr_id: 0,
+                source_info: None,
+            });
+        }
+    }
+
+    // Extract the bindings list and result expression
+    let bindings_expr = args.remove(0);
+    let result_expr = args.remove(0);
+
+    // The first argument must be a list
+    let bindings = match bindings_expr.expr {
+        Expr::List(list) => list.elements,
+        _ => {
+            return Err(ParseError {
+                source: None,
+                pos: helper.pos_for(bindings_expr.id).unwrap_or_default(),
+                msg: "first argument to cel.block must be a list".to_string(),
+                expr_id: 0,
+                source_info: None,
+            });
+        }
+    };
+
+    // Build nested bindings from right to left (starting from the result)
+    // cel.block([a, b, c], result) becomes:
+    // cel.bind(@index0, a, cel.bind(@index1, b, cel.bind(@index2, c, result)))
+    let mut current_expr = result_expr;
+    for (i, binding) in bindings.into_iter().enumerate().rev() {
+        let var_name = format!("@index{}", i);
+        current_expr = helper.next_expr(Expr::Bind(Box::new(BindExpr {
+            var: var_name,
+            init: binding,
+            result: current_expr,
+        })));
+    }
+
+    Ok(current_expr)
+}
+
+fn index_macro_expander(
+    helper: &mut MacroExprHelper,
+    target: Option<IdedExpr>,
+    mut args: Vec<IdedExpr>,
+) -> Result<IdedExpr, ParseError> {
+    if target.is_none() {
+        unreachable!("Expected a target (cel), but got `None`!")
+    }
+    if args.len() != 1 {
+        unreachable!("Expected one arg!")
+    }
+
+    // Validate that target is the identifier "cel"
+    let target = target.unwrap();
+    match &target.expr {
+        Expr::Ident(name) if name == "cel" => {
+            // Valid cel.index(...) call
+        }
+        _ => {
+            return Err(ParseError {
+                source: None,
+                pos: helper.pos_for(target.id).unwrap_or_default(),
+                msg: "index macro must be called as cel.index(...)".to_string(),
+                expr_id: 0,
+                source_info: None,
+            });
+        }
+    }
+
+    // Extract the index argument
+    let index_expr = args.remove(0);
+
+    // The argument must be an integer literal
+    let index = match index_expr.expr {
+        Expr::Literal(Int(n)) => n,
+        _ => {
+            return Err(ParseError {
+                source: None,
+                pos: helper.pos_for(index_expr.id).unwrap_or_default(),
+                msg: "argument to cel.index must be an integer literal".to_string(),
+                expr_id: 0,
+                source_info: None,
+            });
+        }
+    };
+
+    // Rewrite cel.index(N) to @indexN
+    let ident = format!("@index{}", index);
+    Ok(helper.next_expr(Expr::Ident(ident)))
+}
+
+fn iter_var_macro_expander(
+    helper: &mut MacroExprHelper,
+    target: Option<IdedExpr>,
+    mut args: Vec<IdedExpr>,
+) -> Result<IdedExpr, ParseError> {
+    if target.is_none() {
+        unreachable!("Expected a target (cel), but got `None`!")
+    }
+    if args.len() != 2 {
+        unreachable!("Expected two args!")
+    }
+
+    // Validate that target is the identifier "cel"
+    let target = target.unwrap();
+    match &target.expr {
+        Expr::Ident(name) if name == "cel" => {
+            // Valid cel.iterVar(...) call
+        }
+        _ => {
+            return Err(ParseError {
+                source: None,
+                pos: helper.pos_for(target.id).unwrap_or_default(),
+                msg: "iterVar macro must be called as cel.iterVar(...)".to_string(),
+                expr_id: 0,
+                source_info: None,
+            });
+        }
+    }
+
+    // Extract the two arguments
+    let slot_expr = args.remove(0);
+    let index_expr = args.remove(0);
+
+    // Both arguments must be integer literals
+    let slot = match slot_expr.expr {
+        Expr::Literal(Int(n)) => n,
+        _ => {
+            return Err(ParseError {
+                source: None,
+                pos: helper.pos_for(slot_expr.id).unwrap_or_default(),
+                msg: "first argument to cel.iterVar must be an integer literal".to_string(),
+                expr_id: 0,
+                source_info: None,
+            });
+        }
+    };
+
+    let index = match index_expr.expr {
+        Expr::Literal(Int(n)) => n,
+        _ => {
+            return Err(ParseError {
+                source: None,
+                pos: helper.pos_for(index_expr.id).unwrap_or_default(),
+                msg: "second argument to cel.iterVar must be an integer literal".to_string(),
+                expr_id: 0,
+                source_info: None,
+            });
+        }
+    };
+
+    // Rewrite cel.iterVar(N, M) to @it:N:M
+    let ident = format!("@it:{}:{}", slot, index);
+    Ok(helper.next_expr(Expr::Ident(ident)))
 }
 
 fn extract_ident(expr: IdedExpr, helper: &mut MacroExprHelper) -> Result<String, ParseError> {

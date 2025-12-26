@@ -338,6 +338,7 @@ pub fn type_(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         #[cfg(feature = "chrono")]
         Value::Duration(_) => "google.protobuf.Duration",
         Value::Function(_, _) => "function",
+        Value::Namespace(_) => "string",
         Value::Opaque(ref opaque) => {
             // Handle DynValue specially - return the type of the inner value
             use crate::objects::DynValue;
@@ -2574,6 +2575,7 @@ fn format_value_as_string(value: &Value) -> std::result::Result<String, String> 
         }
         // Dyn values are wrapped in Opaque, handle them there
         Value::Function(_, _) => Ok("<function>".to_string()),
+        Value::Namespace(s) => Ok(s.as_str().to_string()),
         Value::Opaque(ref opaque) => {
             // Handle DynValue specially - format the inner value
             use crate::objects::DynValue;
@@ -3043,5 +3045,57 @@ mod tests {
         ]
         .iter()
         .for_each(assert_error)
+    }
+}
+
+/// Check if a proto message has an extension field.
+/// proto.hasExt(msg, extension_name) -> bool
+pub fn proto_has_ext(msg: Value, extension_name: Value) -> Result<Value> {
+    let ext_name = match &extension_name {
+        Value::String(s) => s,
+        Value::Namespace(s) => s,
+        _ => {
+            return Err(ExecutionError::function_error(
+                "proto.hasExt",
+                "extension name must be a string or namespace",
+            ))
+        }
+    };
+
+    match msg {
+        Value::Struct(s) => Ok(Value::Bool(s.fields.contains_key(ext_name.as_str()))),
+        _ => Err(ExecutionError::function_error(
+            "proto.hasExt",
+            "first argument must be a proto message (struct)",
+        )),
+    }
+}
+
+/// Get the value of a proto extension field.
+/// proto.getExt(msg, extension_name) -> value
+pub fn proto_get_ext(msg: Value, extension_name: Value) -> Result<Value> {
+    let ext_name = match &extension_name {
+        Value::String(s) => s,
+        Value::Namespace(s) => s,
+        _ => {
+            return Err(ExecutionError::function_error(
+                "proto.getExt",
+                "extension name must be a string or namespace",
+            ))
+        }
+    };
+
+    match msg {
+        Value::Struct(s) => s
+            .fields
+            .get(ext_name.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                ExecutionError::NoSuchKey(ext_name.clone())
+            }),
+        _ => Err(ExecutionError::function_error(
+            "proto.getExt",
+            "first argument must be a proto message (struct)",
+        )),
     }
 }

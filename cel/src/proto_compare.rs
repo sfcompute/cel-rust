@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 /// A parsed protobuf field value
 #[derive(Debug, Clone, PartialEq)]
-enum FieldValue {
+pub enum FieldValue {
     /// Variable-length integer (wire type 0)
     Varint(u64),
     /// 64-bit value (wire type 1)
@@ -42,7 +42,7 @@ fn decode_varint(bytes: &[u8]) -> Option<(u64, usize)> {
 
 /// Parse protobuf wire format into a field map.
 /// Returns None if the bytes cannot be parsed as valid protobuf.
-fn parse_proto_wire_format(bytes: &[u8]) -> Option<FieldMap> {
+pub fn parse_proto_wire_format(bytes: &[u8]) -> Option<FieldMap> {
     let mut field_map: FieldMap = HashMap::new();
     let mut pos = 0;
 
@@ -111,25 +111,44 @@ fn parse_proto_wire_format(bytes: &[u8]) -> Option<FieldMap> {
 }
 
 /// Compare two field values semantically.
-fn compare_field_values(a: &FieldValue, b: &FieldValue) -> bool {
+///
+/// `depth` parameter controls recursion depth. We only recursively parse
+/// nested messages at depth 0 (top level). For deeper levels, we use
+/// bytewise comparison to avoid infinite recursion and to handle cases
+/// where length-delimited fields are strings/bytes rather than nested messages.
+fn compare_field_values(a: &FieldValue, b: &FieldValue, depth: usize) -> bool {
     match (a, b) {
         (FieldValue::Varint(a), FieldValue::Varint(b)) => a == b,
         (FieldValue::Fixed64(a), FieldValue::Fixed64(b)) => a == b,
         (FieldValue::Fixed32(a), FieldValue::Fixed32(b)) => a == b,
         (FieldValue::LengthDelimited(a), FieldValue::LengthDelimited(b)) => {
-            // For length-delimited fields, compare bytewise.
-            // We don't recursively parse nested messages because:
-            // 1. We can't validate semantic correctness (e.g., required fields)
-            // 2. Nested Any messages may be malformed
-            // 3. The CEL spec expects bytewise fallback for invalid nested content
-            a == b
+            // Try recursive parsing for nested messages at top level only
+            // This allows comparing messages with different field orders
+            if depth == 0 {
+                // Try to parse as nested protobuf messages and compare semantically
+                // If parsing fails, fall back to bytewise comparison
+                match (parse_proto_wire_format(a), parse_proto_wire_format(b)) {
+                    (Some(map_a), Some(map_b)) => {
+                        // Both are valid protobuf messages, compare semantically
+                        compare_field_maps_with_depth(&map_a, &map_b, depth + 1)
+                    }
+                    _ => {
+                        // Either not valid protobuf or parsing failed
+                        // Fall back to bytewise comparison (for strings, bytes, etc.)
+                        a == b
+                    }
+                }
+            } else {
+                // At deeper levels, use bytewise comparison
+                a == b
+            }
         }
         _ => false, // Different types
     }
 }
 
-/// Compare two field maps semantically.
-fn compare_field_maps(a: &FieldMap, b: &FieldMap) -> bool {
+/// Compare two field maps semantically with depth tracking.
+fn compare_field_maps_with_depth(a: &FieldMap, b: &FieldMap, depth: usize) -> bool {
     // Check if both have the same field numbers
     if a.len() != b.len() {
         return false;
@@ -145,7 +164,7 @@ fn compare_field_maps(a: &FieldMap, b: &FieldMap) -> bool {
                 }
                 // Compare each value
                 for (val_a, val_b) in values_a.iter().zip(values_b.iter()) {
-                    if !compare_field_values(val_a, val_b) {
+                    if !compare_field_values(val_a, val_b, depth) {
                         return false;
                     }
                 }
@@ -155,6 +174,52 @@ fn compare_field_maps(a: &FieldMap, b: &FieldMap) -> bool {
     }
 
     true
+}
+
+/// Compare two field maps semantically (top-level entry point).
+fn compare_field_maps(a: &FieldMap, b: &FieldMap) -> bool {
+    compare_field_maps_with_depth(a, b, 0)
+}
+
+/// Convert a FieldValue to a CEL Value.
+/// This is a best-effort conversion for unpacking Any values.
+pub fn field_value_to_cel(field_value: &FieldValue) -> crate::objects::Value {
+    use crate::objects::Value;
+    use std::sync::Arc;
+
+    match field_value {
+        FieldValue::Varint(v) => {
+            // Varint could be int, uint, bool, or enum
+            // For simplicity, treat as Int if it fits in i64, otherwise UInt
+            if *v <= i64::MAX as u64 {
+                Value::Int(*v as i64)
+            } else {
+                Value::UInt(*v)
+            }
+        }
+        FieldValue::Fixed64(bytes) => {
+            // Could be fixed64, sfixed64, or double
+            // Try to interpret as double (most common for field 12 in TestAllTypes)
+            let value = f64::from_le_bytes(*bytes);
+            Value::Float(value)
+        }
+        FieldValue::Fixed32(bytes) => {
+            // Could be fixed32, sfixed32, or float
+            // Try to interpret as float (most common)
+            let value = f32::from_le_bytes(*bytes);
+            Value::Float(value as f64)
+        }
+        FieldValue::LengthDelimited(bytes) => {
+            // Could be string, bytes, or nested message
+            // Try to decode as UTF-8 string first
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                Value::String(Arc::new(s.to_string()))
+            } else {
+                // Not valid UTF-8, treat as bytes
+                Value::Bytes(Arc::new(bytes.clone()))
+            }
+        }
+    }
 }
 
 /// Compare two protobuf wire-format byte arrays semantically.

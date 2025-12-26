@@ -270,21 +270,8 @@ fn parse_raw_string(
         if c == '\\' && in_quotes {
             match chars.next() {
                 Some((_, c2)) => {
-                    match c2 {
-                        '"' => {
-                            if in_single_quotes {
-                                res.push(c);
-                            }
-                        }
-                        '\'' => {
-                            if in_double_quotes {
-                                res.push(c);
-                            }
-                        }
-                        _ => {
-                            res.push(c);
-                        }
-                    };
+                    // In raw strings, always preserve backslash and following character literally
+                    res.push(c);
                     res.push(c2);
                     continue;
                 }

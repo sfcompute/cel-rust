@@ -37,7 +37,7 @@ mod json;
 pub use json::ConvertToJsonError;
 
 #[cfg(feature = "proto")]
-mod proto_compare;
+pub mod proto_compare;
 
 use magic::FromContext;
 
