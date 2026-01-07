@@ -92,27 +92,16 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// Set the container prefix for type name qualification
-    pub fn set_container(&mut self, c: String) {
-        match self {
-            Context::Root { container, .. } => {
-                *container = Some(c);
+    pub fn with_container(mut self, container: String) -> Self {
+        match &mut self {
+            Context::Root { container: c, .. } => {
+                *c = Some(container);
             }
-            Context::Child { container, .. } => {
-                *container = Some(c);
-            }
-        }
-    }
-
-    /// Get the container prefix for type name qualification
-    pub fn get_container(&self) -> Option<&str> {
-        match self {
-            Context::Root { container, .. } => container.as_deref(),
-            Context::Child { container, parent, .. } => {
-                // Child context can have its own container, or inherit from parent
-                container.as_deref().or_else(|| parent.get_container())
+            Context::Child { container: c, .. } => {
+                *c = Some(container);
             }
         }
+        self
     }
 
     pub fn get_variable<S>(&self, name: S) -> Result<Value, ExecutionError>
@@ -125,24 +114,54 @@ impl<'a> Context<'a> {
                 variables,
                 parent,
                 resolver,
-                ..
-            } => resolver
-                .and_then(|r| r.resolve(name))
-                .or_else(|| {
-                    variables
-                        .get(name)
-                        .cloned()
-                        .or_else(|| parent.get_variable(name).ok())
-                })
-                .ok_or_else(|| ExecutionError::UndeclaredReference(name.to_string().into())),
+                container,
+            } => {
+                // Try container-qualified name first
+                if let Some(ref cont) = container {
+                    let qualified = format!("{}.{}", cont, name);
+                    if let Some(val) = resolver
+                        .and_then(|r| r.resolve(&qualified))
+                        .or_else(|| variables.get(&qualified).cloned())
+                        .or_else(|| parent.get_variable(&qualified).ok())
+                    {
+                        return Ok(val);
+                    }
+                }
+
+                // Fall back to unqualified name
+                resolver
+                    .and_then(|r| r.resolve(name))
+                    .or_else(|| {
+                        variables
+                            .get(name)
+                            .cloned()
+                            .or_else(|| parent.get_variable(name).ok())
+                    })
+                    .ok_or_else(|| ExecutionError::UndeclaredReference(name.to_string().into()))
+            }
             Context::Root {
                 variables,
                 resolver,
+                container,
                 ..
-            } => resolver
-                .and_then(|r| r.resolve(name))
-                .or_else(|| variables.get(name).cloned())
-                .ok_or_else(|| ExecutionError::UndeclaredReference(name.to_string().into())),
+            } => {
+                // Try container-qualified name first
+                if let Some(ref cont) = container {
+                    let qualified = format!("{}.{}", cont, name);
+                    if let Some(val) = resolver
+                        .and_then(|r| r.resolve(&qualified))
+                        .or_else(|| variables.get(&qualified).cloned())
+                    {
+                        return Ok(val);
+                    }
+                }
+
+                // Fall back to unqualified name
+                resolver
+                    .and_then(|r| r.resolve(name))
+                    .or_else(|| variables.get(name).cloned())
+                    .ok_or_else(|| ExecutionError::UndeclaredReference(name.to_string().into()))
+            }
         }
     }
 
@@ -162,6 +181,15 @@ impl<'a> Context<'a> {
         };
     }
 
+    /// Returns the container namespace for type resolution.
+    /// When evaluating struct literals, unqualified type names are prefixed with this container.
+    pub fn container(&self) -> Option<&str> {
+        match self {
+            Context::Root { container, .. } => container.as_deref(),
+            Context::Child { container, .. } => container.as_deref(),
+        }
+    }
+
     pub fn resolve(&self, expr: &Expression) -> Result<Value, ExecutionError> {
         Value::resolve(expr, self)
     }
@@ -175,7 +203,7 @@ impl<'a> Context<'a> {
             parent: self,
             variables: Default::default(),
             resolver: None,
-            container: None,  // Child inherits container from parent via get_container()
+            container: None,
         }
     }
 

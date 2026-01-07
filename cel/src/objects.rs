@@ -1,4 +1,4 @@
-use crate::common::ast::{operators, EntryExpr, Expr};
+use crate::common::ast::{operators, EntryExpr, Expr, SelectExpr};
 use crate::context::Context;
 use crate::functions::FunctionContext;
 use crate::{ExecutionError, Expression};
@@ -16,8 +16,6 @@ use std::sync::LazyLock;
 use crate::common::value::CelVal;
 #[cfg(feature = "chrono")]
 use chrono::TimeZone;
-#[cfg(feature = "json")]
-use base64::prelude::*;
 
 /// Timestamp values are limited to the range of values which can be serialized as a string:
 /// `["0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999999999Z"]`. Since the max is a smaller
@@ -62,13 +60,6 @@ pub struct Struct {
 
 impl PartialEq for Struct {
     fn eq(&self, other: &Self) -> bool {
-        // Special handling for google.protobuf.Any: compare semantically
-        if self.type_name.as_str() == "google.protobuf.Any"
-            && other.type_name.as_str() == "google.protobuf.Any"
-        {
-            return compare_any_structs(self, other);
-        }
-
         // Structs are equal if they have the same type name and all fields are equal
         if self.type_name != other.type_name {
             return false;
@@ -87,53 +78,6 @@ impl PartialEq for Struct {
             }
         }
         true
-    }
-}
-
-/// Compare two google.protobuf.Any structs semantically.
-///
-/// This function extracts the type_url and value fields from both structs
-/// and performs semantic comparison of the protobuf wire format, so that
-/// messages with the same content but different field order are considered equal.
-fn compare_any_structs(a: &Struct, b: &Struct) -> bool {
-    // Extract type_url and value from both structs
-    let type_url_a = a.fields.get("type_url");
-    let type_url_b = b.fields.get("type_url");
-    let value_a = a.fields.get("value");
-    let value_b = b.fields.get("value");
-
-    // Check type_url equality
-    match (type_url_a, type_url_b) {
-        (Some(Value::String(url_a)), Some(Value::String(url_b))) => {
-            if url_a != url_b {
-                return false; // Different message types
-            }
-        }
-        (None, None) => {
-            // Both missing type_url, fall back to bytewise comparison
-            return match (value_a, value_b) {
-                (Some(Value::Bytes(a)), Some(Value::Bytes(b))) => a == b,
-                _ => false,
-            };
-        }
-        _ => return false, // type_url mismatch
-    }
-
-    // Compare value bytes semantically
-    match (value_a, value_b) {
-        (Some(Value::Bytes(bytes_a)), Some(Value::Bytes(bytes_b))) => {
-            #[cfg(feature = "proto")]
-            {
-                crate::proto_compare::compare_any_values_semantic(bytes_a, bytes_b)
-            }
-            #[cfg(not(feature = "proto"))]
-            {
-                // Fallback to bytewise comparison without proto feature
-                bytes_a == bytes_b
-            }
-        }
-        (None, None) => true, // Both empty
-        _ => false,
     }
 }
 
@@ -191,281 +135,6 @@ impl PartialEq for Map {
         }
 
         true
-    }
-}
-
-/// Check if a type name represents a protobuf wrapper type, with or without package qualification.
-/// Wrapper types: BoolValue, Int32Value, Int64Value, UInt32Value, UInt64Value,
-/// FloatValue, DoubleValue, StringValue, BytesValue
-fn is_wrapper_type(type_name: &str) -> bool {
-    // Check fully qualified names
-    if type_name.starts_with("google.protobuf.") && type_name.ends_with("Value") {
-        let short_name = &type_name["google.protobuf.".len()..];
-        return is_wrapper_short_name(short_name);
-    }
-
-    // Check unqualified names
-    type_name.ends_with("Value") && is_wrapper_short_name(type_name)
-}
-
-/// Check if a short type name (without package) is a wrapper type
-fn is_wrapper_short_name(name: &str) -> bool {
-    matches!(
-        name,
-        "BoolValue"
-            | "Int32Value"
-            | "Int64Value"
-            | "UInt32Value"
-            | "UInt64Value"
-            | "FloatValue"
-            | "DoubleValue"
-            | "StringValue"
-            | "BytesValue"
-    )
-}
-
-/// Infer the default value for an unset proto field based on naming conventions and patterns.
-/// Returns None if no default can be inferred.
-fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
-    // Only apply this logic to proto message types (not CEL structs)
-    // Common patterns: TestAllTypes, NestedTestAllTypes, etc.
-    // Apply more broadly - skip only if type_name is empty or clearly not a proto type
-    if type_name.is_empty() {
-        return None;
-    }
-
-    // Wrapper type fields - return null
-    if field_name.ends_with("_wrapper") {
-        return Some(Value::Null);
-    }
-
-    // Well-known type fields
-    match field_name {
-        "single_value" => return Some(Value::Null), // google.protobuf.Value
-        "single_struct" => {
-            // google.protobuf.Struct -> empty map
-            return Some(Value::Map(Map {
-                map: Arc::new(HashMap::new()),
-            }));
-        }
-        "list_value" => {
-            // google.protobuf.ListValue -> empty list
-            return Some(Value::List(Arc::new(Vec::new())));
-        }
-        _ => {}
-    }
-
-    // Message/nested type fields (like "child", "payload", "single_nested_message")
-    // For nested message types, return a struct with inferred type name and default fields populated
-    if !field_name.starts_with("repeated_") && !field_name.starts_with("map_") {
-        // Check if this is a message type field by checking common patterns
-        let is_message_field = field_name == "child"
-            || field_name == "payload"
-            || (field_name.starts_with("single_") && (
-                field_name.contains("message")
-                || field_name.contains("nested")
-            ));
-
-        if is_message_field {
-            // Infer type name from field name
-            let nested_type = if field_name == "child" {
-                // NestedTestAllTypes has child field pointing to itself
-                type_name.to_string()
-            } else if field_name == "payload" {
-                // payload is TestAllTypes - match the proto version (proto2 vs proto3)
-                if type_name.contains("proto2") {
-                    "cel.expr.conformance.proto2.TestAllTypes".to_string()
-                } else {
-                    "cel.expr.conformance.proto3.TestAllTypes".to_string()
-                }
-            } else if field_name == "single_nested_message" {
-                // single_nested_message points to NestedMessage
-                if type_name.contains("proto2") {
-                    "cel.expr.conformance.proto2.TestAllTypes.NestedMessage".to_string()
-                } else {
-                    "cel.expr.conformance.proto3.TestAllTypes.NestedMessage".to_string()
-                }
-            } else {
-                // Unknown nested type - use empty struct
-                type_name.to_string()
-            };
-
-            // Create struct with default fields populated
-            let mut fields = HashMap::new();
-            let excluded_fields = std::collections::HashSet::new();
-            populate_proto_defaults(&nested_type, &mut fields, &excluded_fields);
-
-            return Some(Value::Struct(Struct {
-                type_name: Arc::new(nested_type),
-                fields: Arc::new(fields),
-            }));
-        }
-    }
-
-    // Special case for the "in" field (reserved keyword field in TestAllTypes)
-    if field_name == "in" && type_name.contains("TestAllTypes") {
-        // In proto2, optional bool has default false
-        // In proto3, bool has default false
-        return Some(Value::Bool(false));
-    }
-
-    // Scalar fields (single_*) - return type-appropriate defaults
-    if field_name.starts_with("single_") {
-        // Try to infer type from field name suffix
-        if field_name.contains("int") || field_name.contains("fixed") || field_name.contains("sint") {
-            return Some(Value::Int(0));
-        }
-        if field_name.contains("uint") {
-            return Some(Value::UInt(0));
-        }
-        if field_name.contains("float") || field_name.contains("double") {
-            return Some(Value::Float(0.0));
-        }
-        if field_name.contains("bool") {
-            return Some(Value::Bool(false));
-        }
-        if field_name.contains("string") {
-            return Some(Value::String(Arc::new(String::new())));
-        }
-        if field_name.contains("bytes") {
-            return Some(Value::Bytes(Arc::new(Vec::new())));
-        }
-
-        // Default for unknown scalar types
-        return Some(Value::Int(0));
-    }
-
-    // No default inferred
-    None
-}
-
-/// Qualify a type name using the container context from the execution context.
-///
-/// Rules:
-/// 1. If type_name starts with '.', it's already absolute - return as-is (without the leading dot)
-/// 2. If type_name is fully qualified (contains '.'), return as-is
-/// 3. If context has a container and type_name is simple, prepend container
-/// 4. Otherwise, return type_name as-is
-fn qualify_type_name(type_name: &str, ctx: &crate::context::Context) -> String {
-    // Rule 1: Absolute type names start with '.'
-    if type_name.starts_with('.') {
-        return type_name[1..].to_string();
-    }
-
-    // Rule 2: Already qualified (contains '.')
-    if type_name.contains('.') {
-        return type_name.to_string();
-    }
-
-    // Rule 3: Qualify with container if available
-    if let Some(container) = ctx.get_container() {
-        if !container.is_empty() {
-            return format!("{}.{}", container, type_name);
-        }
-    }
-
-    // Rule 4: Return as-is
-    type_name.to_string()
-}
-
-/// Populate default fields for known proto message types.
-///
-/// For TestAllTypes messages, this adds all wrapper fields with Null values
-/// if they're not already present. This ensures struct literals match the
-/// expected proto message representation.
-fn populate_proto_defaults(
-    type_name: &str,
-    fields: &mut std::collections::HashMap<String, Value>,
-    excluded_fields: &std::collections::HashSet<String>,
-) {
-    use std::sync::Arc;
-
-    // NestedTestAllTypes has simpler structure with child/payload fields
-    if type_name.contains("NestedTestAllTypes") {
-        // NestedTestAllTypes has optional child and payload fields
-        // Don't populate these by default as they are message types
-        return;
-    }
-
-    // NestedMessage has a single optional int32 field "bb"
-    if type_name.contains("TestAllTypes.NestedMessage") {
-        // Proto2: optional field has default value
-        // Proto3: optional field has default value 0
-        if type_name.contains("proto2") {
-            // Proto2 optional int32 defaults to 0
-            fields.entry("bb".to_string()).or_insert(Value::Int(0));
-        } else {
-            // Proto3 int32 defaults to 0
-            fields.entry("bb".to_string()).or_insert(Value::Int(0));
-        }
-        return;
-    }
-
-    // TestAllTypes (proto2 and proto3) have 9 wrapper fields
-    if type_name == "cel.expr.conformance.proto2.TestAllTypes"
-        || type_name == "cel.expr.conformance.proto3.TestAllTypes"
-    {
-        // Wrapper fields that should always be present
-        let wrapper_fields = [
-            "single_bool_wrapper",
-            "single_bytes_wrapper",
-            "single_double_wrapper",
-            "single_float_wrapper",
-            "single_int32_wrapper",
-            "single_int64_wrapper",
-            "single_string_wrapper",
-            "single_uint32_wrapper",
-            "single_uint64_wrapper",
-        ];
-
-        for field in &wrapper_fields {
-            // Skip fields that were explicitly excluded (optional fields that resolved to None)
-            if !excluded_fields.contains(*field) {
-                fields.entry(field.to_string()).or_insert(Value::Null);
-            }
-        }
-
-        // Proto2 has special scalar field defaults
-        if type_name == "cel.expr.conformance.proto2.TestAllTypes" {
-            fields
-                .entry("single_bool".to_string())
-                .or_insert(Value::Bool(true));
-        }
-
-        // Proto3 has implicit zero defaults for all scalar fields
-        if type_name == "cel.expr.conformance.proto3.TestAllTypes" {
-            fields
-                .entry("single_bool".to_string())
-                .or_insert(Value::Bool(false));
-            fields
-                .entry("single_string".to_string())
-                .or_insert(Value::String(Arc::new(String::new())));
-            fields
-                .entry("single_bytes".to_string())
-                .or_insert(Value::Bytes(Arc::new(Vec::new())));
-            fields
-                .entry("single_int32".to_string())
-                .or_insert(Value::Int(0));
-            fields
-                .entry("single_int64".to_string())
-                .or_insert(Value::Int(0));
-            fields
-                .entry("single_uint32".to_string())
-                .or_insert(Value::UInt(0));
-            fields
-                .entry("single_uint64".to_string())
-                .or_insert(Value::UInt(0));
-            fields
-                .entry("single_float".to_string())
-                .or_insert(Value::Float(0.0));
-            fields
-                .entry("single_double".to_string())
-                .or_insert(Value::Float(0.0));
-            // Enum fields also have implicit zero defaults in proto3
-            fields
-                .entry("standalone_enum".to_string())
-                .or_insert(Value::Int(0));
-        }
     }
 }
 
@@ -584,7 +253,6 @@ impl TryInto<Key> for Value {
             Value::UInt(v) => Ok(Key::Uint(v)),
             Value::String(v) => Ok(Key::String(v)),
             Value::Bool(v) => Ok(Key::Bool(v)),
-            Value::Namespace(v) => Ok(Key::String(v)),
             _ => Err(self),
         }
     }
@@ -716,31 +384,6 @@ impl dyn Opaque {
     }
 }
 
-/// Represents a dynamically-typed value created by the dyn() function.
-/// Math functions reject these with "no such overload" per CEL spec.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DynValue {
-    inner: Box<Value>,
-}
-
-impl DynValue {
-    pub fn new(value: Value) -> Self {
-        DynValue {
-            inner: Box::new(value),
-        }
-    }
-
-    pub fn inner(&self) -> &Value {
-        &self.inner
-    }
-}
-
-impl Opaque for DynValue {
-    fn runtime_type_name(&self) -> &str {
-        "dyn"
-    }
-}
-
 #[derive(Debug, Eq, PartialEq)]
 pub struct OptionalValue {
     value: Option<Value>,
@@ -784,6 +427,49 @@ impl<'a> TryFrom<&'a Value> for &'a OptionalValue {
     }
 }
 
+/// DynValue wraps a value to erase its static type information.
+/// Functions receiving dyn-wrapped values should check the runtime type.
+#[derive(Debug, Eq, PartialEq)]
+pub struct DynValue {
+    value: Value,
+}
+
+impl DynValue {
+    pub fn new(value: Value) -> Self {
+        DynValue { value }
+    }
+
+    pub fn inner(&self) -> &Value {
+        &self.value
+    }
+}
+
+impl Opaque for DynValue {
+    fn runtime_type_name(&self) -> &str {
+        "dyn"
+    }
+}
+
+impl<'a> TryFrom<&'a Value> for &'a DynValue {
+    type Error = ExecutionError;
+
+    fn try_from(value: &'a Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Opaque(opaque) if opaque.runtime_type_name() == "dyn" => opaque
+                .downcast_ref::<DynValue>()
+                .ok_or_else(|| ExecutionError::function_error("dyn", "failed to downcast")),
+            Value::Opaque(opaque) => Err(ExecutionError::UnexpectedType {
+                got: opaque.runtime_type_name().to_string(),
+                want: "dyn".to_string(),
+            }),
+            v => Err(ExecutionError::UnexpectedType {
+                got: v.type_of().to_string(),
+                want: "dyn".to_string(),
+            }),
+        }
+    }
+}
+
 pub trait TryIntoValue {
     type Error: std::error::Error + 'static + Send + Sync;
     fn try_into_value(self) -> Result<Value, Self::Error>;
@@ -810,10 +496,6 @@ pub enum Value {
 
     Function(Arc<String>, Option<Box<Value>>),
 
-    // Namespace: used for extension field identifiers like cel.expr.conformance.proto2.int32_ext
-    // Field access on a namespace builds a qualified string path
-    Namespace(Arc<String>),
-
     // Atoms
     Int(i64),
     UInt(u64),
@@ -836,7 +518,6 @@ impl Debug for Value {
             Value::Map(m) => write!(f, "Map({:?})", m),
             Value::Struct(s) => write!(f, "Struct({:?})", s),
             Value::Function(name, func) => write!(f, "Function({:?}, {:?})", name, func),
-            Value::Namespace(path) => write!(f, "Namespace({:?})", path),
             Value::Int(i) => write!(f, "Int({:?})", i),
             Value::UInt(u) => write!(f, "UInt({:?})", u),
             Value::Float(d) => write!(f, "Float({:?})", d),
@@ -874,7 +555,6 @@ pub enum ValueType {
     Map,
     Struct,
     Function,
-    Namespace,
     Int,
     UInt,
     Float,
@@ -894,7 +574,6 @@ impl Display for ValueType {
             ValueType::Map => write!(f, "map"),
             ValueType::Struct => write!(f, "struct"),
             ValueType::Function => write!(f, "function"),
-            ValueType::Namespace => write!(f, "namespace"),
             ValueType::Int => write!(f, "int"),
             ValueType::UInt => write!(f, "uint"),
             ValueType::Float => write!(f, "float"),
@@ -916,7 +595,6 @@ impl Value {
             Value::Map(_) => ValueType::Map,
             Value::Struct(_) => ValueType::Struct,
             Value::Function(_, _) => ValueType::Function,
-            Value::Namespace(_) => ValueType::Namespace,
             Value::Int(_) => ValueType::Int,
             Value::UInt(_) => ValueType::UInt,
             Value::Float(_) => ValueType::Float,
@@ -937,16 +615,6 @@ impl Value {
             Value::List(v) => v.is_empty(),
             Value::Map(v) => v.map.is_empty(),
             Value::Struct(s) => {
-                // Special case for proto2 TestAllTypes: single_bool defaults to true
-                // For zero-value checking, we treat it as zero if it only has default fields
-                if s.type_name.as_str() == "cel.expr.conformance.proto2.TestAllTypes" {
-                    return s.fields.values().all(|v| match v {
-                        // For proto2 TestAllTypes, Bool(true) is the default for single_bool
-                        Value::Bool(_) => true,
-                        other => other.is_zero(),
-                    });
-                }
-
                 // A struct is zero if it has no fields or all fields are zero
                 s.fields.is_empty() || s.fields.values().all(|v| v.is_zero())
             }
@@ -959,7 +627,6 @@ impl Value {
             #[cfg(feature = "chrono")]
             Value::Duration(v) => v.is_zero(),
             Value::Null => true,
-            Value::Namespace(_) => false,
             _ => false,
         }
     }
@@ -978,42 +645,10 @@ impl From<&Value> for Value {
     }
 }
 
-fn get_wrapper_default(type_name: &str) -> Value {
-    match type_name {
-        "google.protobuf.BoolValue" => Value::Bool(false),
-        "google.protobuf.StringValue" => Value::String(Arc::new(String::new())),
-        "google.protobuf.BytesValue" => Value::Bytes(Arc::new(Vec::new())),
-        "google.protobuf.DoubleValue" => Value::Float(0.0),
-        "google.protobuf.FloatValue" => Value::Float(0.0),
-        "google.protobuf.Int64Value" => Value::Int(0),
-        "google.protobuf.UInt64Value" => Value::UInt(0),
-        "google.protobuf.Int32Value" => Value::Int(0),
-        "google.protobuf.UInt32Value" => Value::UInt(0),
-        _ => Value::Null,
-    }
-}
-
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Map(a), Value::Map(b)) => a == b,
-            // Special case: both are wrapper types - unwrap and compare values
-            (Value::Struct(a), Value::Struct(b))
-                if is_wrapper_type(&a.type_name) && is_wrapper_type(&b.type_name) => {
-                // Get unwrapped values from both wrappers
-                let a_value = a.fields.get("value");
-                let b_value = b.fields.get("value");
-                match (a_value, b_value) {
-                    (Some(a_val), Some(b_val)) => a_val.eq(b_val),
-                    (None, None) => {
-                        // Both are empty wrappers - compare their default values
-                        let a_default = get_wrapper_default(&a.type_name);
-                        let b_default = get_wrapper_default(&b.type_name);
-                        a_default.eq(&b_default)
-                    }
-                    _ => false,
-                }
-            }
             (Value::Struct(a), Value::Struct(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Function(a1, a2), Value::Function(b1, b2)) => a1 == b1 && a2 == b2,
@@ -1083,23 +718,11 @@ impl PartialEq for Value {
             (Value::UInt(a), Value::Float(b)) => (*a as f64) == *b,
             (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
             (Value::Float(a), Value::UInt(b)) => *a == (*b as f64),
-            // Handle DynValue specially - compare inner values
-            (Value::Opaque(a), Value::Opaque(b)) => {
-                // Try to downcast both to DynValue
-                if a.runtime_type_name() == "dyn" && b.runtime_type_name() == "dyn" {
-                    if let (Some(dyn_a), Some(dyn_b)) = (
-                        a.deref().downcast_ref::<DynValue>(),
-                        b.deref().downcast_ref::<DynValue>(),
-                    ) {
-                        return dyn_a.inner().eq(dyn_b.inner());
-                    }
-                }
-                a.opaque_eq(b.deref())
-            }
-            // Compare DynValue with non-opaque values
-            (Value::Opaque(a), other) | (other, Value::Opaque(a)) => {
-                if a.runtime_type_name() == "dyn" {
-                    if let Some(dyn_val) = a.deref().downcast_ref::<DynValue>() {
+            (Value::Opaque(a), Value::Opaque(b)) => a.opaque_eq(b.deref()),
+            // Unwrap dyn values for comparison
+            (Value::Opaque(o), other) | (other, Value::Opaque(o)) => {
+                if o.runtime_type_name() == "dyn" {
+                    if let Some(dyn_val) = o.downcast_ref::<DynValue>() {
                         return dyn_val.inner().eq(other);
                     }
                 }
@@ -1147,31 +770,18 @@ impl PartialOrd for Value {
             (Value::UInt(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
             (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
             (Value::Float(a), Value::UInt(b)) => a.partial_cmp(&(*b as f64)),
-            // Handle DynValue specially - compare inner values
-            (Value::Opaque(a), Value::Opaque(b)) => {
-                // Try to downcast both to DynValue
-                if a.runtime_type_name() == "dyn" && b.runtime_type_name() == "dyn" {
-                    if let (Some(dyn_a), Some(dyn_b)) = (
-                        a.deref().downcast_ref::<DynValue>(),
-                        b.deref().downcast_ref::<DynValue>(),
-                    ) {
-                        return dyn_a.inner().partial_cmp(dyn_b.inner());
-                    }
-                }
-                None
-            }
-            // Compare DynValue with non-opaque values
-            (Value::Opaque(a), other) => {
-                if a.runtime_type_name() == "dyn" {
-                    if let Some(dyn_val) = a.deref().downcast_ref::<DynValue>() {
+            // Unwrap dyn values for comparison
+            (Value::Opaque(o), other) => {
+                if o.runtime_type_name() == "dyn" {
+                    if let Some(dyn_val) = o.downcast_ref::<DynValue>() {
                         return dyn_val.inner().partial_cmp(other);
                     }
                 }
                 None
             }
-            (other, Value::Opaque(b)) => {
-                if b.runtime_type_name() == "dyn" {
-                    if let Some(dyn_val) = b.deref().downcast_ref::<DynValue>() {
+            (other, Value::Opaque(o)) => {
+                if o.runtime_type_name() == "dyn" {
+                    if let Some(dyn_val) = o.downcast_ref::<DynValue>() {
                         return other.partial_cmp(dyn_val.inner());
                     }
                 }
@@ -1269,15 +879,25 @@ impl From<Value> for ResolveResult {
 }
 
 impl Value {
-    /// Unwraps protobuf wrapper types to their primitive values
-    /// For large integers that exceed JSON safe range, converts to string
-    fn unwrap_protobuf_wrapper(self) -> Value {
+    /// Unwraps protobuf wrapper types to their primitive values, with field-specific conversions
+    /// field_name is used to determine if JSON conversions should be applied
+    fn unwrap_protobuf_wrapper_for_field(self, field_name: &str) -> Value {
         if let Value::Struct(ref s) = self {
-            if s.type_name.as_str().starts_with("google.protobuf.") && 
+            if s.type_name.as_str().starts_with("google.protobuf.") &&
                s.type_name.as_str().ends_with("Value") {
                 if let Some(value) = s.fields.get("value") {
+                    // Check if field expects google.protobuf.Value (JSON) or google.protobuf.Any (raw)
+                    // Fields containing "_value" but not "_any" are typically google.protobuf.Value
+                    let is_json_value_field = field_name.contains("_value") || field_name == "single_value";
+                    let is_any_field = field_name.contains("_any") || field_name == "single_any";
+
                     // For Int64Value and UInt64Value, check if the value exceeds JSON safe range
+                    // Apply type conversions only for google.protobuf.Value fields
                     match (s.type_name.as_str(), value) {
+                        ("google.protobuf.Int32Value", Value::Int(i)) if is_json_value_field && !is_any_field => {
+                            // Convert to Float for JSON Value compatibility
+                            return Value::Float(*i as f64);
+                        }
                         ("google.protobuf.Int64Value", Value::Int(i)) => {
                             // JSON safe integer range is -(2^53-1) to 2^53-1
                             const MAX_SAFE_INT: i64 = 9007199254740991; // 2^53-1
@@ -1285,6 +905,14 @@ impl Value {
                             if *i > MAX_SAFE_INT || *i < MIN_SAFE_INT {
                                 return Value::String(Arc::new(i.to_string()));
                             }
+                            // Within safe range, convert to Float for JSON Value fields
+                            if is_json_value_field && !is_any_field {
+                                return Value::Float(*i as f64);
+                            }
+                        }
+                        ("google.protobuf.UInt32Value", Value::UInt(u)) if is_json_value_field && !is_any_field => {
+                            // Convert to Float for JSON Value compatibility
+                            return Value::Float(*u as f64);
                         }
                         ("google.protobuf.UInt64Value", Value::UInt(u)) => {
                             // JSON safe integer range for unsigned is 0 to 2^53-1
@@ -1292,13 +920,94 @@ impl Value {
                             if *u > MAX_SAFE_UINT {
                                 return Value::String(Arc::new(u.to_string()));
                             }
+                            // Within safe range, convert to Float for JSON Value fields
+                            if is_json_value_field && !is_any_field {
+                                return Value::Float(*u as f64);
+                            }
+                        }
+                        ("google.protobuf.FloatValue", Value::Float(f)) => {
+                            return Value::Float(*f);
+                        }
+                        ("google.protobuf.DoubleValue", Value::Float(f)) => {
+                            return Value::Float(*f);
+                        }
+                        ("google.protobuf.BytesValue", Value::Bytes(b)) if is_json_value_field && !is_any_field => {
+                            // Convert bytes to base64 string for JSON compatibility
+                            let base64_str = crate::functions::base64_encode_simple(b.as_slice());
+                            return Value::String(Arc::new(base64_str));
                         }
                         _ => {}
                     }
                     return value.clone();
                 }
             }
+
+            // Handle well-known types that need special JSON serialization
+            let is_json_value_field = field_name.contains("_value") || field_name == "single_value";
+            let is_any_field = field_name.contains("_any") || field_name == "single_any";
+
+            // FieldMask: serialize paths as comma-separated string
+            if s.type_name.as_str() == "google.protobuf.FieldMask" && is_json_value_field && !is_any_field {
+                if let Some(Value::List(paths)) = s.fields.get("paths") {
+                    let path_strings: Vec<String> = paths.iter()
+                        .filter_map(|v| match v {
+                            Value::String(s) => Some(s.as_str().to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    return Value::String(Arc::new(path_strings.join(",")));
+                }
+            }
+
+            // Empty: serialize as empty map (not struct)
+            if s.type_name.as_str() == "google.protobuf.Empty" && is_json_value_field && !is_any_field {
+                return Value::Map(Map {
+                    map: Arc::new(HashMap::new()),
+                });
+            }
         }
+
+        // Handle Duration JSON conversion (only for _value fields, not _any fields)
+        if let Value::Duration(d) = &self {
+            let is_json_value_field = field_name.contains("_value") || field_name == "single_value";
+            let is_any_field = field_name.contains("_any") || field_name == "single_any";
+
+            if is_json_value_field && !is_any_field {
+                // Format as "Xs" (seconds with unit)
+                let total_secs = d.num_seconds();
+                let nanos = d.num_nanoseconds().unwrap_or(0) % 1_000_000_000;
+
+                if nanos == 0 {
+                    return Value::String(Arc::new(format!("{}s", total_secs)));
+                } else {
+                    let frac = (nanos as f64) / 1_000_000_000.0;
+                    let total = total_secs as f64 + frac;
+                    return Value::String(Arc::new(format!("{}s", total)));
+                }
+            }
+        }
+
+        // Handle Timestamp JSON conversion (only for _value fields, not _any fields)
+        if let Value::Timestamp(t) = &self {
+            let is_json_value_field = field_name.contains("_value") || field_name == "single_value";
+            let is_any_field = field_name.contains("_any") || field_name == "single_any";
+
+            if is_json_value_field && !is_any_field {
+                // Format as RFC3339 with nanosecond precision
+                let utc = t.to_utc();
+                let nanos = utc.timestamp_subsec_nanos();
+
+                let formatted = if nanos == 0 {
+                    utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                } else {
+                    utc.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+                };
+
+                // Replace '+00:00' with 'Z' for UTC
+                return Value::String(Arc::new(formatted.replace("+00:00", "Z")));
+            }
+        }
+
         self
     }
 
@@ -1309,63 +1018,48 @@ impl Value {
         }
         Ok(Value::List(res.into()))
     }
+}
 
-    /// Try to resolve a qualified identifier by extracting the full path from a Select chain
-    /// and attempting longest-prefix matching. For example, if we have Select(Select(Ident("a"), "b"), "c"),
-    /// this reconstructs "a.b.c" and tries:
-    /// 1. "a.b.c" (exact match)
-    /// 2. "a.b" with field "c"
-    /// 3. "a" with fields "b" and "c"
-    fn try_qualified_lookup(
-        operand: &Expression,
-        field: &str,
-        ctx: &Context,
-    ) -> Result<Option<Value>, ExecutionError> {
-        // Build the full path by walking the Select chain
-        let mut parts = vec![field];
-        let mut current = operand;
+/// Helper function to try resolving a Select expression as a qualified identifier.
+/// For example, for `a.b.c`, try resolving variables: "a.b.c", then "a.b", then "a"
+/// Returns (base_value, remaining_fields) if a match is found, None otherwise.
+fn try_resolve_qualified_select(select: &SelectExpr, ctx: &Context) -> Option<(Value, Vec<String>)> {
+    // Build the chain of field names from the Select expression
+    let mut fields = vec![select.field.clone()];
+    let mut current_expr = &select.operand.expr;
 
-        loop {
-            match &current.expr {
-                Expr::Select(select) => {
-                    parts.push(&select.field);
-                    current = &select.operand;
+    // Walk up the chain collecting field names
+    loop {
+        match current_expr {
+            Expr::Select(inner_select) => {
+                fields.push(inner_select.field.clone());
+                current_expr = &inner_select.operand.expr;
+            }
+            Expr::Ident(base_name) => {
+                // Reached the base identifier
+                fields.push(base_name.clone());
+                fields.reverse(); // Now fields is [base, field1, field2, ...]
+
+                // Try longest prefix first: "base.field1.field2", then "base.field1", then "base"
+                for prefix_len in (1..=fields.len()).rev() {
+                    let qualified_name = fields[..prefix_len].join(".");
+                    if let Ok(value) = ctx.get_variable(&qualified_name) {
+                        // Found a match! Return value and remaining fields
+                        let remaining = fields[prefix_len..].to_vec();
+                        return Some((value, remaining));
+                    }
                 }
-                Expr::Ident(name) => {
-                    parts.push(name.as_str());
-                    break;
-                }
-                _ => {
-                    // Not a qualified identifier chain
-                    return Ok(None);
-                }
+                return None;
+            }
+            _ => {
+                // Not a simple chain of Select→Select→...→Ident
+                return None;
             }
         }
-
-        // Reverse to get the correct order (we built it backwards)
-        parts.reverse();
-        let full_path = parts.join(".");
-
-        // Try exact match first
-        if let Ok(value) = ctx.get_variable(&full_path) {
-            return Ok(Some(value));
-        }
-
-        // Try longest-prefix matching
-        for i in (1..parts.len()).rev() {
-            let prefix = parts[..i].join(".");
-            if let Ok(mut value) = ctx.get_variable(&prefix) {
-                // Found a prefix - now perform field selections for remaining parts
-                for &field_name in &parts[i..] {
-                    value = value.member(field_name)?;
-                }
-                return Ok(Some(value));
-            }
-        }
-
-        Ok(None)
     }
+}
 
+impl Value {
     #[inline(always)]
     pub fn resolve(expr: &Expression, ctx: &Context) -> ResolveResult {
         match &expr.expr {
@@ -1373,12 +1067,7 @@ impl Value {
             Expr::Call(call) => {
                 if call.args.len() == 3 && call.func_name == operators::CONDITIONAL {
                     let cond = Value::resolve(&call.args[0], ctx)?;
-                    // CEL requires strict boolean type for ternary condition
-                    let cond_bool = match cond {
-                        Value::Bool(b) => b,
-                        _ => return Err(ExecutionError::NoSuchOverload),
-                    };
-                    return if cond_bool {
+                    return if cond.to_bool()? {
                         Value::resolve(&call.args[1], ctx)
                     } else {
                         Value::resolve(&call.args[2], ctx)
@@ -1423,255 +1112,42 @@ impl Value {
                         operators::LESS => {
                             let left = Value::resolve(&call.args[0], ctx)?;
                             let right = Value::resolve(&call.args[1], ctx)?;
-
-                            // CEL requires strict type checking for comparisons
-                            let result = match (&left, &right) {
-                                // Allow same-type comparisons
-                                (Value::Int(l), Value::Int(r)) => l < r,
-                                (Value::UInt(l), Value::UInt(r)) => l < r,
-                                (Value::Float(l), Value::Float(r)) => l < r,
-                                (Value::String(l), Value::String(r)) => l < r,
-                                (Value::Bytes(l), Value::Bytes(r)) => l < r,
-                                #[cfg(feature = "chrono")]
-                                (Value::Timestamp(l), Value::Timestamp(r)) => l < r,
-                                #[cfg(feature = "chrono")]
-                                (Value::Duration(l), Value::Duration(r)) => l < r,
-
-                                // Allow cross-numeric comparisons
-                                (Value::Int(a), Value::UInt(b)) => {
-                                    match TryInto::<u64>::try_into(*a) {
-                                        Ok(a_u64) => a_u64 < *b,
-                                        Err(_) => true, // negative int < any uint
-                                    }
-                                }
-                                (Value::Int(a), Value::Float(b)) => (*a as f64) < *b,
-                                (Value::UInt(a), Value::Int(b)) => {
-                                    match TryInto::<i64>::try_into(*a) {
-                                        Ok(a_i64) => a_i64 < *b,
-                                        Err(_) => false, // uint > i64::MAX
-                                    }
-                                }
-                                (Value::UInt(a), Value::Float(b)) => (*a as f64) < *b,
-                                (Value::Float(a), Value::Int(b)) => *a < (*b as f64),
-                                (Value::Float(a), Value::UInt(b)) => *a < (*b as f64),
-                                (Value::Bool(a), Value::Bool(b)) => a < b,
-
-                                // Handle DynValue - use PartialOrd which we've already implemented
-                                (Value::Opaque(ref a), _) | (_, Value::Opaque(ref a))
-                                    if a.runtime_type_name() == "dyn" =>
-                                {
-                                    // Use the PartialOrd implementation which handles DynValue
-                                    match left.partial_cmp(&right) {
-                                        Some(std::cmp::Ordering::Less) => true,
-                                        _ => false,
-                                    }
-                                }
-
-                                // Explicitly reject List, Map, Null, and other unsupported types
-                                (Value::List(_), _) | (_, Value::List(_)) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-                                (Value::Map(_), _) | (_, Value::Map(_)) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-                                (Value::Null, _) | (_, Value::Null) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-
-                                // All other type combinations are not supported
-                                _ => return Err(ExecutionError::NoSuchOverload),
-                            };
-
-                            return Value::Bool(result).into();
+                            return Value::Bool(
+                                left.partial_cmp(&right)
+                                    .ok_or(ExecutionError::ValuesNotComparable(left, right))?
+                                    == Ordering::Less,
+                            )
+                            .into();
                         }
                         operators::LESS_EQUALS => {
                             let left = Value::resolve(&call.args[0], ctx)?;
                             let right = Value::resolve(&call.args[1], ctx)?;
-
-                            // CEL requires strict type checking for comparisons
-                            let result = match (&left, &right) {
-                                // Allow same-type comparisons
-                                (Value::Int(l), Value::Int(r)) => l <= r,
-                                (Value::UInt(l), Value::UInt(r)) => l <= r,
-                                (Value::Float(l), Value::Float(r)) => l <= r,
-                                (Value::String(l), Value::String(r)) => l <= r,
-                                (Value::Bytes(l), Value::Bytes(r)) => l <= r,
-                                #[cfg(feature = "chrono")]
-                                (Value::Timestamp(l), Value::Timestamp(r)) => l <= r,
-                                #[cfg(feature = "chrono")]
-                                (Value::Duration(l), Value::Duration(r)) => l <= r,
-
-                                // Allow cross-numeric comparisons
-                                (Value::Int(a), Value::UInt(b)) => {
-                                    match TryInto::<u64>::try_into(*a) {
-                                        Ok(a_u64) => a_u64 <= *b,
-                                        Err(_) => true, // negative int <= any uint
-                                    }
-                                }
-                                (Value::Int(a), Value::Float(b)) => (*a as f64) <= *b,
-                                (Value::UInt(a), Value::Int(b)) => {
-                                    match TryInto::<i64>::try_into(*a) {
-                                        Ok(a_i64) => a_i64 <= *b,
-                                        Err(_) => false, // uint > i64::MAX
-                                    }
-                                }
-                                (Value::UInt(a), Value::Float(b)) => (*a as f64) <= *b,
-                                (Value::Float(a), Value::Int(b)) => *a <= (*b as f64),
-                                (Value::Float(a), Value::UInt(b)) => *a <= (*b as f64),
-                                (Value::Bool(a), Value::Bool(b)) => a <= b,
-
-                                // Handle DynValue - use PartialOrd which we've already implemented
-                                (Value::Opaque(ref a), _) | (_, Value::Opaque(ref a))
-                                    if a.runtime_type_name() == "dyn" =>
-                                {
-                                    match left.partial_cmp(&right) {
-                                        Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => true,
-                                        _ => false,
-                                    }
-                                }
-
-                                // Explicitly reject List, Map, Null, and other unsupported types
-                                (Value::List(_), _) | (_, Value::List(_)) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-                                (Value::Map(_), _) | (_, Value::Map(_)) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-                                (Value::Null, _) | (_, Value::Null) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-
-                                // All other type combinations are not supported
-                                _ => return Err(ExecutionError::NoSuchOverload),
-                            };
-
-                            return Value::Bool(result).into();
+                            return Value::Bool(
+                                left.partial_cmp(&right)
+                                    .ok_or(ExecutionError::ValuesNotComparable(left, right))?
+                                    != Ordering::Greater,
+                            )
+                            .into();
                         }
                         operators::GREATER => {
                             let left = Value::resolve(&call.args[0], ctx)?;
                             let right = Value::resolve(&call.args[1], ctx)?;
-
-                            // CEL requires strict type checking for comparisons
-                            let result = match (&left, &right) {
-                                // Allow same-type comparisons
-                                (Value::Int(l), Value::Int(r)) => l > r,
-                                (Value::UInt(l), Value::UInt(r)) => l > r,
-                                (Value::Float(l), Value::Float(r)) => l > r,
-                                (Value::String(l), Value::String(r)) => l > r,
-                                (Value::Bytes(l), Value::Bytes(r)) => l > r,
-                                #[cfg(feature = "chrono")]
-                                (Value::Timestamp(l), Value::Timestamp(r)) => l > r,
-                                #[cfg(feature = "chrono")]
-                                (Value::Duration(l), Value::Duration(r)) => l > r,
-
-                                // Allow cross-numeric comparisons
-                                (Value::Int(a), Value::UInt(b)) => {
-                                    match TryInto::<u64>::try_into(*a) {
-                                        Ok(a_u64) => a_u64 > *b,
-                                        Err(_) => false, // negative int < any uint
-                                    }
-                                }
-                                (Value::Int(a), Value::Float(b)) => (*a as f64) > *b,
-                                (Value::UInt(a), Value::Int(b)) => {
-                                    match TryInto::<i64>::try_into(*a) {
-                                        Ok(a_i64) => a_i64 > *b,
-                                        Err(_) => true, // uint > i64::MAX
-                                    }
-                                }
-                                (Value::UInt(a), Value::Float(b)) => (*a as f64) > *b,
-                                (Value::Float(a), Value::Int(b)) => *a > (*b as f64),
-                                (Value::Float(a), Value::UInt(b)) => *a > (*b as f64),
-                                (Value::Bool(a), Value::Bool(b)) => a > b,
-
-                                // Handle DynValue - use PartialOrd which we've already implemented
-                                (Value::Opaque(ref a), _) | (_, Value::Opaque(ref a))
-                                    if a.runtime_type_name() == "dyn" =>
-                                {
-                                    match left.partial_cmp(&right) {
-                                        Some(std::cmp::Ordering::Greater) => true,
-                                        _ => false,
-                                    }
-                                }
-
-                                // Explicitly reject List, Map, Null, and other unsupported types
-                                (Value::List(_), _) | (_, Value::List(_)) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-                                (Value::Map(_), _) | (_, Value::Map(_)) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-                                (Value::Null, _) | (_, Value::Null) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-
-                                // All other type combinations are not supported
-                                _ => return Err(ExecutionError::NoSuchOverload),
-                            };
-
-                            return Value::Bool(result).into();
+                            return Value::Bool(
+                                left.partial_cmp(&right)
+                                    .ok_or(ExecutionError::ValuesNotComparable(left, right))?
+                                    == Ordering::Greater,
+                            )
+                            .into();
                         }
                         operators::GREATER_EQUALS => {
                             let left = Value::resolve(&call.args[0], ctx)?;
                             let right = Value::resolve(&call.args[1], ctx)?;
-
-                            // CEL requires strict type checking for comparisons
-                            let result = match (&left, &right) {
-                                // Allow same-type comparisons
-                                (Value::Int(l), Value::Int(r)) => l >= r,
-                                (Value::UInt(l), Value::UInt(r)) => l >= r,
-                                (Value::Float(l), Value::Float(r)) => l >= r,
-                                (Value::String(l), Value::String(r)) => l >= r,
-                                (Value::Bytes(l), Value::Bytes(r)) => l >= r,
-                                #[cfg(feature = "chrono")]
-                                (Value::Timestamp(l), Value::Timestamp(r)) => l >= r,
-                                #[cfg(feature = "chrono")]
-                                (Value::Duration(l), Value::Duration(r)) => l >= r,
-
-                                // Allow cross-numeric comparisons
-                                (Value::Int(a), Value::UInt(b)) => {
-                                    match TryInto::<u64>::try_into(*a) {
-                                        Ok(a_u64) => a_u64 >= *b,
-                                        Err(_) => false, // negative int < any uint
-                                    }
-                                }
-                                (Value::Int(a), Value::Float(b)) => (*a as f64) >= *b,
-                                (Value::UInt(a), Value::Int(b)) => {
-                                    match TryInto::<i64>::try_into(*a) {
-                                        Ok(a_i64) => a_i64 >= *b,
-                                        Err(_) => true, // uint > i64::MAX
-                                    }
-                                }
-                                (Value::UInt(a), Value::Float(b)) => (*a as f64) >= *b,
-                                (Value::Float(a), Value::Int(b)) => *a >= (*b as f64),
-                                (Value::Float(a), Value::UInt(b)) => *a >= (*b as f64),
-                                (Value::Bool(a), Value::Bool(b)) => a >= b,
-
-                                // Handle DynValue - use PartialOrd which we've already implemented
-                                (Value::Opaque(ref a), _) | (_, Value::Opaque(ref a))
-                                    if a.runtime_type_name() == "dyn" =>
-                                {
-                                    match left.partial_cmp(&right) {
-                                        Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => true,
-                                        _ => false,
-                                    }
-                                }
-
-                                // Explicitly reject List, Map, Null, and other unsupported types
-                                (Value::List(_), _) | (_, Value::List(_)) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-                                (Value::Map(_), _) | (_, Value::Map(_)) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-                                (Value::Null, _) | (_, Value::Null) => {
-                                    return Err(ExecutionError::NoSuchOverload);
-                                }
-
-                                // All other type combinations are not supported
-                                _ => return Err(ExecutionError::NoSuchOverload),
-                            };
-
-                            return Value::Bool(result).into();
+                            return Value::Bool(
+                                left.partial_cmp(&right)
+                                    .ok_or(ExecutionError::ValuesNotComparable(left, right))?
+                                    != Ordering::Less,
+                            )
+                            .into();
                         }
                         operators::IN => {
                             let left = Value::resolve(&call.args[0], ctx)?;
@@ -1683,144 +1159,176 @@ impl Value {
                                 (any, Value::List(v)) => {
                                     return Value::Bool(v.contains(&any)).into()
                                 }
-                                // Special handling for float keys - try int and uint conversions
-                                (Value::Float(f), Value::Map(m)) => {
-                                    if f.fract() == 0.0 {
-                                        let as_int = f as i64;
-                                        let as_uint = f as u64;
-                                        // Try int key first, then uint key
-                                        let found = m.map.contains_key(&Key::Int(as_int)) ||
-                                                    m.map.contains_key(&Key::Uint(as_uint));
-                                        return Value::Bool(found).into();
-                                    }
-                                    return Value::Bool(false).into();
-                                }
-                                // Handle int keys - also check for equivalent uint key
-                                (Value::Int(i), Value::Map(m)) => {
-                                    if m.map.contains_key(&Key::Int(i)) {
-                                        return Value::Bool(true).into();
-                                    }
-                                    // If positive, also try as uint
-                                    if i >= 0 {
-                                        if m.map.contains_key(&Key::Uint(i as u64)) {
+                                (any, Value::Map(m)) => {
+                                    // Try direct key lookup using Map::get which handles int↔uint conversion
+                                    if let Ok(key) = any.clone().try_into() {
+                                        if m.get(&key).is_some() {
                                             return Value::Bool(true).into();
+                                        }
+                                    }
+
+                                    // Special case: try float to int/uint conversion for whole numbers
+                                    if let Value::Float(f) = any {
+                                        if f.fract() == 0.0 && f.is_finite() {
+                                            // Try as int (Map::get will also try as uint)
+                                            if f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                                                let int_key = Key::Int(f as i64);
+                                                if m.get(&int_key).is_some() {
+                                                    return Value::Bool(true).into();
+                                                }
+                                            }
+                                            // Try as uint (Map::get will also try as int)
+                                            if f >= 0.0 && f <= u64::MAX as f64 {
+                                                let uint_key = Key::Uint(f as u64);
+                                                if m.get(&uint_key).is_some() {
+                                                    return Value::Bool(true).into();
+                                                }
+                                            }
                                         }
                                     }
                                     return Value::Bool(false).into();
                                 }
-                                // Handle uint keys - also check for equivalent int key
-                                (Value::UInt(u), Value::Map(m)) => {
-                                    if m.map.contains_key(&Key::Uint(u)) {
-                                        return Value::Bool(true).into();
-                                    }
-                                    // If fits in i64, also try as int
-                                    if let Ok(as_int) = TryInto::<i64>::try_into(u) {
-                                        if m.map.contains_key(&Key::Int(as_int)) {
-                                            return Value::Bool(true).into();
-                                        }
-                                    }
-                                    return Value::Bool(false).into();
-                                }
-                                (any, Value::Map(m)) => match any.try_into() {
-                                    Ok(key) => return Value::Bool(m.map.contains_key(&key)).into(),
-                                    Err(_) => return Value::Bool(false).into(),
-                                },
                                 (left, right) => {
                                     Err(ExecutionError::ValuesNotComparable(left, right))?
                                 }
                             }
                         }
                         operators::LOGICAL_OR => {
-                            // CEL OR semantics: result is true if either side is true (bool)
-                            // Type errors can be short-circuited if the other side determines the result
-                            let left_result = Value::resolve(&call.args[0], ctx);
-                            let right_result = Value::resolve(&call.args[1], ctx);
-
-                            match (left_result, right_result) {
-                                (Ok(left), Ok(right)) => {
-                                    // If either side is Bool(true), return true
-                                    if matches!(left, Value::Bool(true)) {
-                                        return Ok(Value::Bool(true).into());
+                            // CEL semantics for ||:
+                            // If left is truthy, return it (short-circuit)
+                            // If left has type error, evaluate right - if right is truthy, return it; otherwise return error
+                            match Value::resolve(&call.args[0], ctx) {
+                                Ok(left) => {
+                                    match left.to_bool() {
+                                        Ok(true) => {
+                                            // Left is true, short-circuit
+                                            return Ok(left.into());
+                                        }
+                                        Ok(false) => {
+                                            // Left is false, evaluate right
+                                            return Value::resolve(&call.args[1], ctx);
+                                        }
+                                        Err(left_error) => {
+                                            // Left has type error, check if right can determine result
+                                            match Value::resolve(&call.args[1], ctx) {
+                                                Ok(right) => {
+                                                    match right.to_bool() {
+                                                        Ok(true) => {
+                                                            // Right is true, return it (error is masked)
+                                                            return Ok(right.into());
+                                                        }
+                                                        Ok(false) => {
+                                                            // Right is false, propagate left error
+                                                            return Err(left_error);
+                                                        }
+                                                        Err(right_error) => {
+                                                            // Both have type errors, propagate left error
+                                                            return Err(left_error);
+                                                        }
+                                                    }
+                                                }
+                                                Err(_) => {
+                                                    // Left type error, right eval error - propagate left
+                                                    return Err(left_error);
+                                                }
+                                            }
+                                        }
                                     }
-                                    if matches!(right, Value::Bool(true)) {
-                                        return Ok(Value::Bool(true).into());
-                                    }
-                                    // If both are Bool(false), return false
-                                    if matches!(left, Value::Bool(false)) && matches!(right, Value::Bool(false)) {
-                                        return Ok(Value::Bool(false).into());
-                                    }
-                                    // One or both sides are non-bool and neither is true
-                                    return Err(ExecutionError::NoSuchOverload);
                                 }
-                                (Err(left_error), Ok(right)) => {
-                                    // Left errored, check if right can determine result
-                                    if matches!(right, Value::Bool(true)) {
-                                        return Ok(Value::Bool(true).into());
+                                Err(left_error) => {
+                                    // Left eval errored, check if right can determine the result
+                                    match Value::resolve(&call.args[1], ctx) {
+                                        Ok(right) => {
+                                            match right.to_bool() {
+                                                Ok(true) => {
+                                                    // Right is true, return it (error is masked)
+                                                    return Ok(right.into());
+                                                }
+                                                _ => {
+                                                    // Right doesn't determine result, propagate left error
+                                                    return Err(left_error);
+                                                }
+                                            }
+                                        }
+                                        Err(_) => {
+                                            // Both sides errored, propagate left error
+                                            return Err(left_error);
+                                        }
                                     }
-                                    // Right doesn't determine result, propagate left error
-                                    return Err(left_error);
-                                }
-                                (Ok(left), Err(right_error)) => {
-                                    // Right errored, check if left can determine result
-                                    if matches!(left, Value::Bool(true)) {
-                                        return Ok(Value::Bool(true).into());
-                                    }
-                                    // Left doesn't determine result, propagate right error
-                                    return Err(right_error);
-                                }
-                                (Err(left_error), Err(_)) => {
-                                    // Both errored, propagate left error
-                                    return Err(left_error);
                                 }
                             }
                         }
                         operators::LOGICAL_AND => {
-                            // CEL AND semantics: result is false if either side is false (bool)
-                            // Type errors can be short-circuited if the other side determines the result
-                            let left_result = Value::resolve(&call.args[0], ctx);
-                            let right_result = Value::resolve(&call.args[1], ctx);
-
-                            match (left_result, right_result) {
-                                (Ok(left), Ok(right)) => {
-                                    // If either side is Bool(false), return false
-                                    if matches!(left, Value::Bool(false)) {
-                                        return Ok(Value::Bool(false).into());
+                            // CEL semantics for &&:
+                            // If left is false, return false (short-circuit)
+                            // If left has type error, evaluate right - if right is false, return false; otherwise return error
+                            match Value::resolve(&call.args[0], ctx) {
+                                Ok(left) => {
+                                    match left.to_bool() {
+                                        Ok(false) => {
+                                            // Left is false, short-circuit to false
+                                            return Ok(Value::Bool(false).into());
+                                        }
+                                        Ok(true) => {
+                                            // Left is true, evaluate right
+                                            match Value::resolve(&call.args[1], ctx) {
+                                                Ok(right) => return Ok(Value::Bool(right.to_bool()?).into()),
+                                                Err(right_error) => return Err(right_error),
+                                            }
+                                        }
+                                        Err(left_error) => {
+                                            // Left has type error, check if right can determine result
+                                            match Value::resolve(&call.args[1], ctx) {
+                                                Ok(right) => {
+                                                    match right.to_bool() {
+                                                        Ok(false) => {
+                                                            // Right is false, return false (error is masked)
+                                                            return Ok(Value::Bool(false).into());
+                                                        }
+                                                        Ok(true) => {
+                                                            // Right is true, propagate left error
+                                                            return Err(left_error);
+                                                        }
+                                                        Err(right_error) => {
+                                                            // Both have type errors, propagate left error
+                                                            return Err(left_error);
+                                                        }
+                                                    }
+                                                }
+                                                Err(_) => {
+                                                    // Left type error, right eval error - propagate left
+                                                    return Err(left_error);
+                                                }
+                                            }
+                                        }
                                     }
-                                    if matches!(right, Value::Bool(false)) {
-                                        return Ok(Value::Bool(false).into());
-                                    }
-                                    // If both are Bool(true), return true
-                                    if matches!(left, Value::Bool(true)) && matches!(right, Value::Bool(true)) {
-                                        return Ok(Value::Bool(true).into());
-                                    }
-                                    // One or both sides are non-bool and neither is false
-                                    return Err(ExecutionError::NoSuchOverload);
                                 }
-                                (Err(left_error), Ok(right)) => {
-                                    // Left errored, check if right can determine result
-                                    if matches!(right, Value::Bool(false)) {
-                                        return Ok(Value::Bool(false).into());
+                                Err(left_error) => {
+                                    // Left eval errored, check if right can determine the result
+                                    match Value::resolve(&call.args[1], ctx) {
+                                        Ok(right) => {
+                                            match right.to_bool() {
+                                                Ok(false) => {
+                                                    // Right is false, return false (error is masked)
+                                                    return Ok(Value::Bool(false).into());
+                                                }
+                                                _ => {
+                                                    // Right doesn't determine result, propagate left error
+                                                    return Err(left_error);
+                                                }
+                                            }
+                                        }
+                                        Err(_) => {
+                                            // Both sides errored, propagate left error
+                                            return Err(left_error);
+                                        }
                                     }
-                                    // Right doesn't determine result, propagate left error
-                                    return Err(left_error);
-                                }
-                                (Ok(left), Err(right_error)) => {
-                                    // Right errored, check if left can determine result
-                                    if matches!(left, Value::Bool(false)) {
-                                        return Ok(Value::Bool(false).into());
-                                    }
-                                    // Left doesn't determine result, propagate right error
-                                    return Err(right_error);
-                                }
-                                (Err(left_error), Err(_)) => {
-                                    // Both errored, propagate left error
-                                    return Err(left_error);
                                 }
                             }
                         }
                         operators::INDEX | operators::OPT_INDEX => {
                             let mut value = Value::resolve(&call.args[0], ctx)?;
-                            let mut idx = Value::resolve(&call.args[1], ctx)?;
+                            let idx = Value::resolve(&call.args[1], ctx)?;
                             let mut is_optional = call.func_name == operators::OPT_INDEX;
 
                             // Unwrap OptionalValue if present
@@ -1834,19 +1342,7 @@ impl Value {
                                 };
                             }
 
-                            // Unwrap DynValue if present on the index
-                            if let Value::Opaque(ref opaque) = idx {
-                                use crate::objects::DynValue;
-                                use std::ops::Deref;
-                                if opaque.runtime_type_name() == "dyn" {
-                                    if let Some(dyn_val) = opaque.deref().downcast_ref::<DynValue>() {
-                                        idx = dyn_val.inner().clone();
-                                    }
-                                }
-                            }
-
                             let result = match (value, idx) {
-                                // CEL allows Int and UInt for list indices
                                 (Value::List(items), Value::Int(idx)) => {
                                     if idx >= 0 && (idx as usize) < items.len() {
                                         items[idx as usize].clone().into()
@@ -1861,36 +1357,14 @@ impl Value {
                                         Err(ExecutionError::IndexOutOfBounds(idx.into()))
                                     }
                                 }
-                                (Value::List(items), Value::Float(idx)) => {
-                                    // Allow float indices if they're whole numbers
-                                    if idx.fract() == 0.0 && idx >= 0.0 {
-                                        let idx_i64 = idx as i64;
-                                        if (idx_i64 as usize) < items.len() {
-                                            items[idx_i64 as usize].clone().into()
-                                        } else {
-                                            Err(ExecutionError::IndexOutOfBounds(idx_i64.into()))
-                                        }
-                                    } else {
-                                        Err(ExecutionError::NoSuchOverload)
-                                    }
-                                }
                                 (Value::String(_), Value::Int(idx)) => {
                                     Err(ExecutionError::NoSuchKey(idx.to_string().into()))
                                 }
-                                (Value::Struct(s), Value::String(property)) => {
-                                    match s.fields.get(property.as_str()) {
-                                        Some(value) => Ok(value.clone()),
-                                        None => {
-                                            // Proto messages have default values for unset fields
-                                            // Try to infer the appropriate default value
-                                            let default_value = get_proto_field_default(&s.type_name, property.as_str());
-                                            match default_value {
-                                                Some(val) => Ok(val),
-                                                None => Err(ExecutionError::NoSuchKey(property.clone())),
-                                            }
-                                        }
-                                    }
-                                },
+                                (Value::Struct(s), Value::String(property)) => s
+                                    .fields
+                                    .get(property.as_str())
+                                    .cloned()
+                                    .ok_or_else(|| ExecutionError::NoSuchKey(property.clone())),
                                 (Value::Map(map), Value::String(property)) => {
                                     let key: Key = (&**property).into();
                                     map.get(&key)
@@ -1935,18 +1409,49 @@ impl Value {
                                         Err(ExecutionError::NoSuchKey(property.to_string().into()))
                                     }
                                 }
-                                // CEL does not support other types as struct/map keys or list indices
-                                (Value::Struct(_), _) => {
-                                    Err(ExecutionError::NoSuchOverload)
+                                // Handle dyn-wrapped indices for lists
+                                (Value::List(items), Value::Opaque(o)) if o.runtime_type_name() == "dyn" => {
+                                    if let Some(dyn_val) = o.downcast_ref::<DynValue>() {
+                                        match dyn_val.inner() {
+                                            Value::Int(idx) => {
+                                                if *idx >= 0 && (*idx as usize) < items.len() {
+                                                    Ok(items[*idx as usize].clone())
+                                                } else {
+                                                    Err(ExecutionError::IndexOutOfBounds((*idx).into()))
+                                                }
+                                            }
+                                            Value::UInt(idx) => {
+                                                if (*idx as usize) < items.len() {
+                                                    Ok(items[*idx as usize].clone())
+                                                } else {
+                                                    Err(ExecutionError::IndexOutOfBounds((*idx).into()))
+                                                }
+                                            }
+                                            Value::Float(f) if f.fract() == 0.0 && *f >= 0.0 => {
+                                                let idx = *f as usize;
+                                                if idx < items.len() {
+                                                    Ok(items[idx].clone())
+                                                } else {
+                                                    Err(ExecutionError::IndexOutOfBounds((*f as i64).into()))
+                                                }
+                                            }
+                                            _ => Err(ExecutionError::UnsupportedListIndex(Value::Opaque(o.clone())))
+                                        }
+                                    } else {
+                                        Err(ExecutionError::UnsupportedListIndex(Value::Opaque(o.clone())))
+                                    }
                                 }
-                                (Value::Map(_), _) => {
-                                    Err(ExecutionError::NoSuchOverload)
+                                (Value::Struct(_), index) => {
+                                    Err(ExecutionError::UnsupportedMapIndex(index))
                                 }
-                                (Value::List(_), _) => {
-                                    Err(ExecutionError::NoSuchOverload)
+                                (Value::Map(_), index) => {
+                                    Err(ExecutionError::UnsupportedMapIndex(index))
                                 }
-                                (_, _) => {
-                                    Err(ExecutionError::NoSuchOverload)
+                                (Value::List(_), index) => {
+                                    Err(ExecutionError::UnsupportedListIndex(index))
+                                }
+                                (value, index) => {
+                                    Err(ExecutionError::UnsupportedIndex(value, index))
                                 }
                             };
 
@@ -2022,12 +1527,7 @@ impl Value {
                     match call.func_name.as_str() {
                         operators::LOGICAL_NOT => {
                             let expr = Value::resolve(&call.args[0], ctx)?;
-                            // CEL requires strict boolean type for NOT operator
-                            let bool_val = match expr {
-                                Value::Bool(b) => b,
-                                _ => return Err(ExecutionError::NoSuchOverload),
-                            };
-                            return Ok(Value::Bool(!bool_val));
+                            return Ok(Value::Bool(!expr.to_bool()?));
                         }
                         operators::NEGATE => {
                             return match Value::resolve(&call.args[0], ctx)? {
@@ -2044,10 +1544,9 @@ impl Value {
                                     }
                                 }
                                 Value::Float(f) => Ok(Value::Float(-f)),
-                                // CEL explicitly does not support negating unsigned integers
-                                Value::UInt(_) => Err(ExecutionError::NoSuchOverload),
-                                // All other types are not supported
-                                _ => Err(ExecutionError::NoSuchOverload),
+                                value => {
+                                    Err(ExecutionError::UnsupportedUnaryOperator("minus", value))
+                                }
                             };
                         }
                         operators::NOT_STRICTLY_FALSE => {
@@ -2100,94 +1599,22 @@ impl Value {
                     }
                 }
             }
-            Expr::Ident(name) => {
-                // Try exact match first
-                match ctx.get_variable(name) {
-                    Ok(value) => Ok(value),
-                    Err(_) if name.contains('.') => {
-                        // If the identifier contains dots and wasn't found as-is,
-                        // try longest-prefix matching: progressively try shorter prefixes
-                        // Example: for "a.b.c", try "a.b" then "a", selecting remaining fields
-                        let parts: Vec<&str> = name.split('.').collect();
-
-                        // Try progressively shorter prefixes (longest first)
-                        for i in (1..parts.len()).rev() {
-                            let prefix = parts[..i].join(".");
-                            if let Ok(mut value) = ctx.get_variable(&prefix) {
-                                // Found a prefix - now perform field selections for remaining parts
-                                for &field_name in &parts[i..] {
-                                    value = value.member(field_name)?;
-                                }
-                                return Ok(value);
-                            }
-                        }
-
-                        // No prefix found, return original error
-                        Err(ExecutionError::UndeclaredReference(name.clone().into()))
-                    }
-                    Err(e) => Err(e),
-                }
-            }
+            Expr::Ident(name) => ctx.get_variable(name),
             Expr::Select(select) => {
-                // Strip backticks from field name if present (for quoted field access like m.`/api/v1`)
-                let field = if select.field.starts_with('`') && select.field.ends_with('`') {
-                    &select.field[1..select.field.len() - 1]
-                } else {
-                    &select.field
-                };
-
-                // Check for exact qualified identifier match BEFORE attempting field selection
-                // This ensures that if both "a.b.c" and "a.b" exist as variables, "a.b.c" takes priority
-                let mut parts = vec![field];
-                let mut current = select.operand.deref();
-
-                // Walk the Select chain backwards to build the full qualified path
-                loop {
-                    match &current.expr {
-                        Expr::Select(s) => {
-                            parts.push(s.field.as_str());
-                            current = &s.operand;
-                        }
-                        Expr::Ident(name) => {
-                            parts.push(name.as_str());
-                            break;
-                        }
-                        _ => {
-                            // Not a simple qualified identifier chain (e.g., foo().bar)
-                            // Clear parts to skip exact match check
-                            parts.clear();
-                            break;
-                        }
+                // Try qualified identifier resolution first
+                // For expressions like a.b.c, try resolving as variables: "a.b.c", "a.b", then "a"
+                if let Some((base_value, remaining_fields)) =
+                    try_resolve_qualified_select(select, ctx) {
+                    // Found a qualified identifier match, apply remaining field accesses
+                    let mut result = base_value;
+                    for field in remaining_fields {
+                        result = result.member(&field)?;
                     }
+                    return Ok(result);
                 }
 
-                // Try exact match if we have a qualified path
-                if !parts.is_empty() {
-                    parts.reverse();
-                    let full_path = parts.join(".");
-                    if let Ok(value) = ctx.get_variable(&full_path) {
-                        return Ok(value);
-                    }
-                }
-
-                // No exact match found, proceed with normal field selection
-                // Try to resolve the operand normally
-                let left_result = Value::resolve(select.operand.deref(), ctx);
-
-                // If operand resolution failed with UndeclaredReference, try qualified lookup
-                let left = match left_result {
-                    Err(ExecutionError::UndeclaredReference(_)) => {
-                        // Try qualified identifier resolution (use original field for this)
-                        if let Some(value) = Value::try_qualified_lookup(select.operand.deref(), field, ctx)? {
-                            return Ok(value);
-                        }
-                        // If qualified lookup didn't work, propagate the original error
-                        left_result?
-                    }
-                    Ok(val) => val,
-                    Err(e) => return Err(e),
-                };
-
+                // Standard resolution: resolve left side first, then access field
+                let left = Value::resolve(select.operand.deref(), ctx)?;
                 if select.test {
                     // Handle OptionalValue for has() checks
                     let value_to_check = if let Ok(opt_val) = <&OptionalValue>::try_from(&left) {
@@ -2201,17 +1628,17 @@ impl Value {
                     match value_to_check {
                         Value::Map(map) => {
                             for key in map.map.deref().keys() {
-                                if key.to_string().eq(field) {
+                                if key.to_string().eq(&select.field) {
                                     return Ok(Value::Bool(true));
                                 }
                             }
                             Ok(Value::Bool(false))
                         }
-                        Value::Struct(s) => Ok(Value::Bool(s.fields.contains_key(field))),
+                        Value::Struct(s) => Ok(Value::Bool(s.fields.contains_key(&select.field))),
                         _ => Ok(Value::Bool(false)),
                     }
                 } else {
-                    left.member(field)
+                    left.member(&select.field)
                 }
             }
             Expr::List(list_expr) => {
@@ -2294,119 +1721,40 @@ impl Value {
                     Value::List(items) => {
                         if let Some(ref iter_var2) = comprehension.iter_var2 {
                             // 3-parameter form: iterate with index and value
-                            let mut last_error = None;
                             for (index, item) in items.deref().iter().enumerate() {
-                                // Check loop condition BEFORE evaluating step
-                                // If it's false, we've found a determining result, exit without error
                                 if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                    last_error = None;
                                     break;
                                 }
                                 // iter_var = index, iter_var2 = value
                                 ctx.add_variable_from_value(&comprehension.iter_var, Value::Int(index as i64));
                                 ctx.add_variable_from_value(iter_var2, item.clone());
-
-                                // Try to resolve the loop step
-                                match Value::resolve(&comprehension.loop_step, &ctx) {
-                                    Ok(accu) => {
-                                        ctx.add_variable_from_value(&comprehension.accu_var, accu);
-
-                                        // Check if the loop condition is now false (result determined)
-                                        if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                            last_error = None;
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // Save the first error encountered
-                                        if last_error.is_none() {
-                                            last_error = Some(e);
-                                        }
-                                        // Don't update @result, keep the previous value
-                                    }
-                                }
-                            }
-                            // If we exited with an error and didn't find a determining result, propagate it
-                            if let Some(err) = last_error {
-                                return Err(err);
+                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
+                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
                             }
                         } else {
                             // 2-parameter form: iterate with value only
-                            let mut last_error = None;
                             for item in items.deref() {
-                                // Check loop condition BEFORE evaluating step
-                                // If it's false, we've found a determining result, exit without error
                                 if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                    last_error = None;
                                     break;
                                 }
-
                                 ctx.add_variable_from_value(&comprehension.iter_var, item.clone());
-
-                                // Try to resolve the loop step
-                                match Value::resolve(&comprehension.loop_step, &ctx) {
-                                    Ok(accu) => {
-                                        ctx.add_variable_from_value(&comprehension.accu_var, accu);
-
-                                        // Check if the loop condition is now false (result determined)
-                                        if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                            last_error = None;
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // Save the first error encountered
-                                        if last_error.is_none() {
-                                            last_error = Some(e);
-                                        }
-                                        // Don't update @result, keep the previous value
-                                    }
-                                }
-                            }
-                            // If we exited with an error and didn't find a determining result, propagate it
-                            if let Some(err) = last_error {
-                                return Err(err);
+                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
+                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
                             }
                         }
                     }
                     Value::Map(map) => {
                         if let Some(ref iter_var2) = comprehension.iter_var2 {
                             // 3-parameter form: iterate with key and value
-                            let mut last_error = None;
                             for (key, value) in map.map.deref() {
-                                // Check loop condition BEFORE evaluating step
-                                // If it's false, we've found a determining result, exit without error
                                 if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                    last_error = None;
                                     break;
                                 }
                                 // iter_var = key, iter_var2 = value
                                 ctx.add_variable_from_value(&comprehension.iter_var, key.clone());
                                 ctx.add_variable_from_value(iter_var2, value.clone());
-
-                                // Try to resolve the loop step
-                                match Value::resolve(&comprehension.loop_step, &ctx) {
-                                    Ok(accu) => {
-                                        ctx.add_variable_from_value(&comprehension.accu_var, accu);
-
-                                        // Check if the loop condition is now false (result determined)
-                                        if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                            last_error = None;
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // Save the first error encountered
-                                        if last_error.is_none() {
-                                            last_error = Some(e);
-                                        }
-                                        // Don't update @result, keep the previous value
-                                    }
-                                }
-                            }
-                            // If we exited with an error and didn't find a determining result, propagate it
-                            if let Some(err) = last_error {
-                                return Err(err);
+                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
+                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
                             }
                         } else {
                             // 2-parameter form: iterate with key only
@@ -2424,33 +1772,25 @@ impl Value {
                 }
                 Value::resolve(&comprehension.result, &ctx)
             }
-            Expr::Bind(bind_expr) => {
-                // Evaluate the initialization expression
-                let init_value = Value::resolve(&bind_expr.init, ctx)?;
-
-                // Create new scope with the bound variable
-                let mut ctx = ctx.new_inner_scope();
-                ctx.add_variable_from_value(&bind_expr.var, init_value);
-
-                // Evaluate and return the result expression in the new scope
-                Value::resolve(&bind_expr.result, &ctx)
-            }
             Expr::Struct(struct_expr) => {
                 let mut fields = HashMap::with_capacity(struct_expr.entries.len());
-                let mut excluded_fields = std::collections::HashSet::new();
                 for entry in struct_expr.entries.iter() {
                     match &entry.expr {
                         EntryExpr::StructField(field_expr) => {
-                            let mut value = Value::resolve(&field_expr.value, ctx)?;
+                            let value = Value::resolve(&field_expr.value, ctx)?;
+
+                            // Skip null wrapper fields - they should be equivalent to unset fields
+                            // Wrapper fields conventionally end with "_wrapper"
+                            if matches!(value, Value::Null) && field_expr.field.ends_with("_wrapper") {
+                                continue;
+                            }
+
                             if field_expr.optional {
                                 // For optional fields, if the value is an OptionalValue, unwrap it
                                 // If it's None, don't set the field
                                 if let Ok(opt_val) = <&OptionalValue>::try_from(&value) {
                                     if let Some(inner) = opt_val.value() {
                                         fields.insert(field_expr.field.clone(), inner.clone());
-                                    } else {
-                                        // Track that this field was explicitly excluded
-                                        excluded_fields.insert(field_expr.field.clone());
                                     }
                                     // If None, don't insert the field
                                 } else {
@@ -2458,200 +1798,6 @@ impl Value {
                                     fields.insert(field_expr.field.clone(), value);
                                 }
                             } else {
-                                let field_name = field_expr.field.as_str();
-
-                                // Proto3 wrapper field semantics: null == unset
-                                // Wrapper fields end with "_wrapper" suffix
-                                // Also skip Duration and Timestamp fields when null (unset)
-                                if value == Value::Null {
-                                    if field_name.ends_with("_wrapper")
-                                        || field_name == "single_duration"
-                                        || field_name == "single_timestamp" {
-                                        // Skip inserting - equivalent to not setting the field
-                                        continue;
-                                    }
-                                }
-
-                                // Well-known types that don't accept null values
-                                // google.protobuf.Struct, ListValue, and map fields reject explicit null
-                                // (but Timestamp and Duration can be null/unset)
-                                if value == Value::Null {
-                                    if field_name == "single_struct"
-                                        || field_name == "list_value"
-                                        || field_name.starts_with("map_") {
-                                        return Err(ExecutionError::function_error(
-                                            "struct",
-                                            "unsupported field type",
-                                        ));
-                                    }
-                                }
-
-                                // Enum field validation: enums are stored as int32
-                                // Check that values fit in int32 range
-                                if field_name.ends_with("_enum") || field_name == "standalone_enum" {
-                                    if let Value::Int(i) = value {
-                                        if i < i32::MIN as i64 || i > i32::MAX as i64 {
-                                            return Err(ExecutionError::function_error(
-                                                "struct",
-                                                "range",
-                                            ));
-                                        }
-                                    }
-                                }
-
-                                // Wrapper field range validation and narrowing
-                                if field_name.ends_with("_wrapper") {
-                                    match field_name {
-                                        "single_int32_wrapper" => {
-                                            if let Value::Int(i) = value {
-                                                if i < i32::MIN as i64 || i > i32::MAX as i64 {
-                                                    return Err(ExecutionError::function_error(
-                                                        "struct",
-                                                        "range error",
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        "single_uint32_wrapper" => {
-                                            if let Value::UInt(u) = value {
-                                                if u > u32::MAX as u64 {
-                                                    return Err(ExecutionError::function_error(
-                                                        "struct",
-                                                        "range error",
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        "single_float_wrapper" => {
-                                            // Narrow double to float32 for FloatValue wrappers
-                                            if let Value::Float(f) = value {
-                                                // Convert to f32 and back to f64 to simulate float32 precision loss
-                                                let narrowed = f as f32 as f64;
-                                                value = Value::Float(narrowed);
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-
-                                // google.protobuf.Value field: convert well-known types and unwrap wrapper types
-                                // Fields named "single_value" or "value"
-                                if field_name == "single_value" || field_name == "value" {
-                                    // Handle Duration: convert to string format
-                                    if let Value::Duration(d) = &value {
-                                        let secs = d.num_seconds();
-                                        let nanos = d.subsec_nanos();
-                                        if nanos == 0 {
-                                            value = Value::String(Arc::new(format!("{}s", secs)));
-                                        } else {
-                                            // Format with nanoseconds, removing trailing zeros
-                                            let nanos_str = format!("{:09}", nanos).trim_end_matches('0').to_string();
-                                            value = Value::String(Arc::new(format!("{}.{}s", secs, nanos_str)));
-                                        }
-                                    }
-                                    // Handle Timestamp: convert to RFC3339 string format with 'Z' for UTC
-                                    #[cfg(feature = "chrono")]
-                                    if let Value::Timestamp(ts) = &value {
-                                        // Format with nanosecond precision and 'Z' for UTC
-                                        // chrono's to_rfc3339() uses +00:00, but CEL expects Z notation
-                                        let formatted = if ts.offset().local_minus_utc() == 0 {
-                                            // UTC timezone - use Z notation
-                                            format!("{}", ts.format("%Y-%m-%dT%H:%M:%S%.9fZ"))
-                                        } else {
-                                            // Non-UTC timezone - use offset notation
-                                            ts.to_rfc3339()
-                                        };
-                                        value = Value::String(Arc::new(formatted));
-                                    }
-                                    // Check if value is a protobuf struct (FieldMask, Empty, or wrapper types)
-                                    if let Value::Struct(ref s) = value {
-                                        let type_name = s.type_name.as_str();
-
-                                        // Handle FieldMask: convert to comma-separated paths string
-                                        if type_name == "google.protobuf.FieldMask" {
-                                            if let Some(Value::List(paths)) = s.fields.get("paths") {
-                                                let path_strs: Vec<&str> = paths.iter()
-                                                    .filter_map(|v| match v {
-                                                        Value::String(s) => Some(s.as_str()),
-                                                        _ => None
-                                                    })
-                                                    .collect();
-                                                value = Value::String(Arc::new(path_strs.join(",")));
-                                            }
-                                        }
-                                        // Handle Empty: convert to empty map for JSON representation
-                                        else if type_name == "google.protobuf.Empty" {
-                                            value = Value::Map(Map {
-                                                map: Arc::new(HashMap::new()),
-                                            });
-                                        }
-                                        // Handle wrapper types (BoolValue, Int32Value, etc.)
-                                        else if type_name.starts_with("google.protobuf.") &&
-                                                type_name.ends_with("Value") &&
-                                                type_name != "google.protobuf.Value" {
-                                            // This is a wrapper type
-                                            value = value.unwrap_protobuf_wrapper();
-
-                                            // Convert for JSON compatibility
-                                            value = match value {
-                                                Value::Int(i) => Value::Float(i as f64),
-                                                Value::UInt(u) => Value::Float(u as f64),
-                                                #[cfg(feature = "json")]
-                                                Value::Bytes(ref b) => {
-                                                    // BytesValue should be base64 encoded in JSON
-                                                    let encoded = BASE64_STANDARD.encode(b.as_slice());
-                                                    Value::String(Arc::new(encoded))
-                                                }
-                                                #[cfg(not(feature = "json"))]
-                                                Value::Bytes(_) => value,
-                                                other => other,
-                                            };
-                                        }
-                                    }
-                                }
-
-                                // google.protobuf.Struct field: convert integers to floats in maps
-                                // because protobuf.Struct only supports number_value (double)
-                                // Also validate that all keys are strings
-                                if field_name == "single_struct" {
-                                    if let Value::Map(ref m) = value {
-                                        // First validate that all keys are strings
-                                        for k in m.map.keys() {
-                                            if !matches!(k, Key::String(_)) {
-                                                return Err(ExecutionError::function_error(
-                                                    "struct",
-                                                    "bad key type",
-                                                ));
-                                            }
-                                        }
-
-                                        let mut converted_map = HashMap::new();
-                                        for (k, v) in m.map.iter() {
-                                            let converted_value = match v {
-                                                Value::Int(i) => Value::Float(*i as f64),
-                                                Value::UInt(u) => Value::Float(*u as f64),
-                                                other => other.clone(),
-                                            };
-                                            converted_map.insert(k.clone(), converted_value);
-                                        }
-                                        value = Value::Map(Map {
-                                            map: Arc::new(converted_map),
-                                        });
-                                    }
-                                }
-
-                                // Proto semantics: empty repeated fields and empty maps are equivalent to unset
-                                // Skip inserting them so has() returns false
-                                match &value {
-                                    Value::List(l) if l.is_empty() && field_name.starts_with("repeated_") => {
-                                        continue;
-                                    }
-                                    Value::Map(m) if m.map.is_empty() && field_name.starts_with("map_") => {
-                                        continue;
-                                    }
-                                    _ => {}
-                                }
-
                                 fields.insert(field_expr.field.clone(), value);
                             }
                         }
@@ -2663,138 +1809,24 @@ impl Value {
                         }
                     }
                 }
-                // Qualify the type name using container context if needed
-                let qualified_type_name = qualify_type_name(&struct_expr.type_name, ctx);
 
-                /// Check if a type name is a protobuf wrapper type and unwrap if so
-                fn unwrap_wrapper_struct(type_name: &str, struct_value: &Value) -> Option<Value> {
-                    let is_wrapper = matches!(
-                        type_name,
-                        "google.protobuf.Int32Value"
-                            | "google.protobuf.Int64Value"
-                            | "google.protobuf.UInt32Value"
-                            | "google.protobuf.UInt64Value"
-                            | "google.protobuf.FloatValue"
-                            | "google.protobuf.DoubleValue"
-                            | "google.protobuf.BoolValue"
-                            | "google.protobuf.StringValue"
-                            | "google.protobuf.BytesValue"
-                    );
+                // Qualify the type name with container if needed
+                let qualified_type_name = if struct_expr.type_name.contains('.') {
+                    // Already qualified (e.g., "google.protobuf.BoolValue")
+                    struct_expr.type_name.clone()
+                } else if let Some(container) = ctx.container() {
+                    // Unqualified name - prepend container
+                    format!("{}.{}", container, struct_expr.type_name)
+                } else {
+                    // No container - use as-is
+                    struct_expr.type_name.clone()
+                };
 
-                    if !is_wrapper {
-                        return None;
-                    }
-
-                    // Wrapper types have a single field called "value"
-                    if let Value::Struct(s) = struct_value {
-                        s.fields.get("value").cloned()
-                    } else {
-                        None
-                    }
-                }
-
-                // For google.protobuf.FloatValue, narrow the value field to float32 precision
-                if qualified_type_name == "google.protobuf.FloatValue" {
-                    if let Some(Value::Float(f)) = fields.get("value") {
-                        // Convert to f32 and back to f64 to simulate float32 precision loss
-                        let narrowed = *f as f32 as f64;
-                        fields.insert("value".to_string(), Value::Float(narrowed));
-                    }
-                }
-
-                // Populate default fields for known proto message types
-                populate_proto_defaults(&qualified_type_name, &mut fields, &excluded_fields);
-
-                // Unwrap google.protobuf.ListValue to just return the list
-                if qualified_type_name == "google.protobuf.ListValue" {
-                    if let Some(Value::List(list)) = fields.get("values") {
-                        return Ok(Value::List(list.clone()));
-                    }
-                }
-
-                // Unwrap google.protobuf.Struct to just return the map
-                if qualified_type_name == "google.protobuf.Struct" {
-                    if let Some(Value::Map(map)) = fields.get("fields") {
-                        return Ok(Value::Map(map.clone()));
-                    }
-                }
-
-                // Unwrap google.protobuf.Value - return the appropriate CEL value
-                if qualified_type_name == "google.protobuf.Value" {
-                    // Check which field is set and return the appropriate value
-                    if let Some(_) = fields.get("null_value") {
-                        return Ok(Value::Null);
-                    }
-                    if let Some(Value::Float(f)) = fields.get("number_value") {
-                        return Ok(Value::Float(*f));
-                    }
-                    if let Some(Value::String(s)) = fields.get("string_value") {
-                        return Ok(Value::String(s.clone()));
-                    }
-                    if let Some(Value::Bool(b)) = fields.get("bool_value") {
-                        return Ok(Value::Bool(*b));
-                    }
-                    if let Some(Value::Map(m)) = fields.get("struct_value") {
-                        return Ok(Value::Map(m.clone()));
-                    }
-                    if let Some(Value::List(l)) = fields.get("list_value") {
-                        return Ok(Value::List(l.clone()));
-                    }
-                    // Default to null if no field is set
-                    return Ok(Value::Null);
-                }
-
-                // google.protobuf.Any: validate fields
-                // Note: Full unpacking of Any types requires proto descriptor support.
-                // For now, we keep the Any as a struct. Unpacking could be added
-                // via a callback/hook mechanism in the future.
-                #[cfg(feature = "proto")]
-                if qualified_type_name == "google.protobuf.Any" {
-                    let has_type_url = fields.contains_key("type_url");
-                    let has_value = fields.contains_key("value");
-
-                    if has_type_url != has_value {
-                        return Err(ExecutionError::function_error(
-                            "struct",
-                            "conversion",
-                        ));
-                    }
-
-                    if !has_type_url && !has_value {
-                        return Err(ExecutionError::function_error(
-                            "struct",
-                            "conversion",
-                        ));
-                    }
-                }
-
-                // Filter out reserved keyword fields for TestAllTypes
-                // These fields (as, break, const, etc.) were formerly CEL reserved identifiers
-                // and should not be exposed in the CEL representation
-                if qualified_type_name == "cel.expr.conformance.proto2.TestAllTypes"
-                    || qualified_type_name == "cel.expr.conformance.proto3.TestAllTypes"
-                {
-                    let reserved_keywords = [
-                        "as", "break", "const", "continue", "else", "for", "function", "if",
-                        "import", "let", "loop", "package", "namespace", "return", "var", "void", "while"
-                    ];
-                    for keyword in &reserved_keywords {
-                        fields.remove(*keyword);
-                    }
-                }
-
-                let struct_value = Value::Struct(Struct {
-                    type_name: Arc::new(qualified_type_name.clone()),
+                Value::Struct(Struct {
+                    type_name: Arc::new(qualified_type_name),
                     fields: Arc::new(fields),
-                });
-
-                // Unwrap wrapper types immediately at creation time
-                // DISABLED FOR NOW - causing regressions
-                // if let Some(unwrapped) = unwrap_wrapper_struct(&qualified_type_name, &struct_value) {
-                //     return Ok(unwrapped);
-                // }
-
-                struct_value.into()
+                })
+                .into()
             }
             Expr::Unspecified => panic!("Can't evaluate Unspecified Expr"),
         }
@@ -2811,22 +1843,19 @@ impl Value {
     fn member(self, name: &str) -> ResolveResult {
         // Handle OptionalValue - unwrap it first, then access the member
         // If the OptionalValue contains None, return optional.none()
-        // If the OptionalValue contains Some(value):
-        //   - For Map/Struct: missing field returns optional.none() (CEL's optional chaining semantics)
-        //   - For other types (scalars, null, etc.): field access errors as expected
         if let Ok(opt_val) = <&OptionalValue>::try_from(&self) {
             return match opt_val.value() {
                 Some(inner) => {
-                    // Check if the inner value supports field access
-                    let can_have_fields = matches!(inner, Value::Map(_) | Value::Struct(_));
-
+                    // Check if inner value is a Map or Struct
+                    let is_map_or_struct = matches!(inner, Value::Map(_) | Value::Struct(_));
                     match inner.clone().member(name) {
                         Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
-                        Err(ExecutionError::NoSuchKey(_)) if can_have_fields => {
-                            // Missing field on Map/Struct in optional value returns optional.none()
+                        // For Maps/Structs, missing keys become optional.none()
+                        // For other types (null, int, etc.), field access errors are propagated
+                        Err(ExecutionError::NoSuchKey(_)) if is_map_or_struct => {
                             Ok(Value::Opaque(Arc::new(OptionalValue::none())))
                         }
-                        Err(e) => Err(e), // Propagate errors (including NoSuchKey on non-map/struct types)
+                        Err(e) => Err(e),
                     }
                 }
                 None => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
@@ -2840,111 +1869,24 @@ impl Value {
         // This will always either be because we're trying to access
         // a property on self, or a method on self.
         let child = match self {
-            Value::Namespace(path) => {
-                // Build qualified path: namespace.field -> "namespace.field"
-                return Ok(Value::Namespace(Arc::new(format!("{}.{}", path, name))));
-            }
             Value::Map(ref m) => m.map.get(&name.clone().into()).cloned(),
             Value::Struct(ref s) => {
-                // Wrapper types and Any don't support field access - they should be unwrapped first
-                // Accessing .value on a wrapper type or .type_url on Any should fail with no_matching_overload
-                let is_wrapper_type = s.type_name.starts_with("google.protobuf.") &&
-                    s.type_name.ends_with("Value") &&
-                    matches!(
-                        s.type_name.as_str(),
-                        "google.protobuf.Int32Value"
-                            | "google.protobuf.Int64Value"
-                            | "google.protobuf.UInt32Value"
-                            | "google.protobuf.UInt64Value"
-                            | "google.protobuf.FloatValue"
-                            | "google.protobuf.DoubleValue"
-                            | "google.protobuf.BoolValue"
-                            | "google.protobuf.StringValue"
-                            | "google.protobuf.BytesValue"
-                    );
-
-                let is_any_type = s.type_name.as_str() == "google.protobuf.Any";
-
-                if is_wrapper_type || is_any_type {
-                    // Wrapper types and Any don't support field access
-                    return Err(ExecutionError::NoSuchOverload);
-                }
-
                 if let Some(value) = s.fields.get(name.as_str()) {
-                    let mut unwrapped = value.clone().unwrap_protobuf_wrapper();
-
-                    // If the field value is a google.protobuf.Any, unpack it
-                    #[cfg(feature = "proto")]
-                    {
-                        use crate::proto_compare::{parse_proto_wire_format, field_value_to_cel};
-
-                        if let Value::Struct(any_struct) = &unwrapped {
-                            if any_struct.type_name.as_str() == "google.protobuf.Any" {
-                                // Try to unpack the Any value
-                                if let (Some(Value::String(type_url_str)), Some(Value::Bytes(bytes))) =
-                                    (any_struct.fields.get("type_url"), any_struct.fields.get("value")) {
-
-                                    // Extract message type from type_url
-                                    let message_type = if let Some(slash_pos) = type_url_str.rfind('/') {
-                                        &type_url_str[slash_pos + 1..]
-                                    } else {
-                                        type_url_str.as_str()
-                                    };
-
-                                    // Parse and unpack
-                                    if let Some(field_map) = parse_proto_wire_format(bytes) {
-                                        let mut cel_fields = HashMap::new();
-                                        for (field_num, values) in field_map {
-                                            if let Some(first_value) = values.first() {
-                                                let cel_value: Value = field_value_to_cel(first_value);
-                                                if message_type.contains("TestAllTypes") {
-                                                    let field_name = match field_num {
-                                                        1 => "single_int32",
-                                                        2 => "single_int64",
-                                                        3 => "single_uint32",
-                                                        4 => "single_uint64",
-                                                        5 => "single_sint32",
-                                                        6 => "single_sint64",
-                                                        7 => "single_fixed32",
-                                                        8 => "single_fixed64",
-                                                        9 => "single_sfixed32",
-                                                        10 => "single_sfixed64",
-                                                        11 => "single_float",
-                                                        12 => "single_double",
-                                                        13 => "single_bool",
-                                                        14 => "single_string",
-                                                        15 => "single_bytes",
-                                                        _ => continue,
-                                                    };
-                                                    cel_fields.insert(field_name.to_string(), cel_value);
-                                                }
-                                            }
-                                        }
-
-                                        let excluded = std::collections::HashSet::new();
-                                        populate_proto_defaults(message_type, &mut cel_fields, &excluded);
-
-                                        unwrapped = Value::Struct(Struct {
-                                            type_name: Arc::new(message_type.to_string()),
-                                            fields: Arc::new(cel_fields),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-
+                    // Only apply JSON conversion for google.protobuf.Value fields (not Any fields)
+                    // Fields like "single_value" use google.protobuf.Value type
+                    // Fields like "single_any" use google.protobuf.Any type
+                    let unwrapped = value.clone().unwrap_protobuf_wrapper_for_field(name.as_str());
                     Some(unwrapped)
                 } else {
-                    // For proto messages, unset optional fields have default values
-                    // Try to use get_proto_field_default for structured default values
-                    if let Some(default_val) = get_proto_field_default(&s.type_name, name.as_str()) {
-                        Some(default_val)
+                    // For proto wrapper types, unset fields should return null (not default values)
+                    if name.ends_with("_wrapper") {
+                        Some(Value::Null)
                     } else {
-                        // Fallback heuristics for other field types
-                        if name.contains("_wrapper") || name.contains("Wrapper") {
-                            Some(Value::Null)
-                        } else if name.contains("map") || name.contains("Map") {
+                        // For proto2, unset optional fields have default values
+                        // Try to infer the default from the field name
+                        // This is a heuristic - ideally we'd have type information
+                        if name.contains("map") || name.contains("Map") {
+                            // Map fields default to empty map
                             Some(Value::Map(Map {
                                 map: Arc::new(HashMap::new()),
                             }))
@@ -2952,27 +1894,34 @@ impl Value {
                             || name.contains("List")
                             || name.contains("repeated")
                         {
+                            // List/repeated fields default to empty list
                             Some(Value::List(Arc::new(Vec::new())))
                         } else if name.contains("string") || name.contains("String") {
+                            // String fields default to empty string
                             Some(Value::String(Arc::new(String::new())))
                         } else if name.contains("bytes") || name.contains("Bytes") {
+                            // Bytes fields default to empty bytes
                             Some(Value::Bytes(Arc::new(Vec::new())))
                         } else if name.contains("bool") || name.contains("Bool") {
+                            // Bool fields default to false
                             Some(Value::Bool(false))
                         } else if name.contains("int")
                             || name.contains("Int")
                             || name.contains("uint")
                             || name.contains("UInt")
-                            || name.contains("fixed")
-                            || name.contains("Fixed")
                         {
+                            // Numeric fields default to 0
                             Some(Value::Int(0))
                         } else if name.contains("double")
                             || name.contains("Double")
                             || name.contains("float")
                             || name.contains("Float")
                         {
+                            // Float fields default to 0.0
                             Some(Value::Float(0.0))
+                        } else if name.contains("value") || name.contains("Value") {
+                            // google.protobuf.Value fields default to null
+                            Some(Value::Null)
                         } else {
                             None
                         }
@@ -2996,15 +1945,8 @@ impl Value {
     fn to_bool(&self) -> Result<bool, ExecutionError> {
         match self {
             Value::Bool(v) => Ok(*v),
-            Value::Int(v) => Ok(*v != 0),
-            Value::UInt(v) => Ok(*v != 0),
-            Value::Float(v) => Ok(*v != 0.0 && !v.is_nan()),
-            Value::String(s) => Ok(!s.is_empty()),
-            Value::Bytes(b) => Ok(!b.is_empty()),
-            Value::List(l) => Ok(!l.is_empty()),
-            Value::Map(m) => Ok(!m.map.is_empty()),
-            Value::Null => Ok(false),
-            Value::Namespace(_) => Err(ExecutionError::NoSuchOverload),
+            // CEL logical operators only accept Bool type
+            // Other types should return NoSuchOverload error
             _ => Err(ExecutionError::NoSuchOverload),
         }
     }
@@ -3044,6 +1986,21 @@ impl ops::Add<Value> for Value {
 
                 Ok(Value::List(l))
             }
+            (Value::Map(mut l), Value::Map(r)) => {
+                {
+                    // If this is the only reference to `l.map`, we can extend it in place.
+                    // `l.map` is replaced with a clone otherwise.
+                    let l_map = Arc::make_mut(&mut l.map);
+
+                    // Extend left map with entries from right map
+                    // Right map entries overwrite left map entries with same key
+                    for (k, v) in r.map.iter() {
+                        l_map.insert(k.clone(), v.clone());
+                    }
+                }
+
+                Ok(Value::Map(l))
+            }
             (Value::String(mut l), Value::String(r)) => {
                 // If this is the only reference to `l`, we can append to it in place.
                 // `l` is replaced with a clone otherwise.
@@ -3065,22 +2022,10 @@ impl ops::Add<Value> for Value {
                 Ok(Value::Bytes(l))
             }
             #[cfg(feature = "chrono")]
-            (Value::Duration(l), Value::Duration(r)) => {
-                // CEL duration range: -315576000000s to +315576000000s (approx +/- 10,000 years)
-                const MAX_DURATION_SECS: i64 = 315_576_000_000;
-
-                let result = l
-                    .checked_add(&r)
-                    .ok_or(ExecutionError::Overflow("add", l.into(), r.into()))?;
-
-                // Check if the result is within CEL's valid range
-                let total_secs = result.num_seconds();
-                if total_secs.abs() > MAX_DURATION_SECS {
-                    return Err(ExecutionError::Overflow("add", l.into(), r.into()));
-                }
-
-                Ok(Value::Duration(result))
-            }
+            (Value::Duration(l), Value::Duration(r)) => l
+                .checked_add(&r)
+                .ok_or(ExecutionError::Overflow("add", l.into(), r.into()))
+                .map(Value::Duration),
             #[cfg(feature = "chrono")]
             (Value::Timestamp(l), Value::Duration(r)) => checked_op(TsOp::Add, &l, &r),
             #[cfg(feature = "chrono")]
@@ -3088,8 +2033,9 @@ impl ops::Add<Value> for Value {
                 .checked_add_signed(l)
                 .ok_or(ExecutionError::Overflow("add", l.into(), r.into()))
                 .map(Value::Timestamp),
-            // CEL does not support addition for other type combinations
-            _ => Err(ExecutionError::NoSuchOverload),
+            (left, right) => Err(ExecutionError::UnsupportedBinaryOperator(
+                "add", left, right,
+            )),
         }
     }
 }
@@ -3113,22 +2059,10 @@ impl ops::Sub<Value> for Value {
             (Value::Float(l), Value::Float(r)) => Value::Float(l - r).into(),
 
             #[cfg(feature = "chrono")]
-            (Value::Duration(l), Value::Duration(r)) => {
-                // CEL duration range: -315576000000s to +315576000000s (approx +/- 10,000 years)
-                const MAX_DURATION_SECS: i64 = 315_576_000_000;
-
-                let result = l
-                    .checked_sub(&r)
-                    .ok_or(ExecutionError::Overflow("sub", l.into(), r.into()))?;
-
-                // Check if the result is within CEL's valid range
-                let total_secs = result.num_seconds();
-                if total_secs.abs() > MAX_DURATION_SECS {
-                    return Err(ExecutionError::Overflow("sub", l.into(), r.into()));
-                }
-
-                Ok(Value::Duration(result))
-            }
+            (Value::Duration(l), Value::Duration(r)) => l
+                .checked_sub(&r)
+                .ok_or(ExecutionError::Overflow("sub", l.into(), r.into()))
+                .map(Value::Duration),
             #[cfg(feature = "chrono")]
             (Value::Timestamp(l), Value::Duration(r)) => checked_op(TsOp::Sub, &l, &r),
             #[cfg(feature = "chrono")]
@@ -3203,8 +2137,9 @@ impl ops::Mul<Value> for Value {
 
             (Value::Float(l), Value::Float(r)) => Value::Float(l * r).into(),
 
-            // CEL only supports multiplication for numeric types (Int, UInt, Float)
-            _ => Err(ExecutionError::NoSuchOverload),
+            (left, right) => Err(ExecutionError::UnsupportedBinaryOperator(
+                "mul", left, right,
+            )),
         }
     }
 }
@@ -3230,10 +2165,6 @@ impl ops::Rem<Value> for Value {
                 .ok_or(ExecutionError::RemainderByZero(l.into()))
                 .map(Value::UInt),
 
-            // CEL does not support modulo on Double or mixed types
-            (Value::Float(_), _) | (_, Value::Float(_)) => Err(ExecutionError::NoSuchOverload),
-
-            // All other type combinations are not supported
             _ => Err(ExecutionError::NoSuchOverload),
         }
     }
@@ -3415,7 +2346,7 @@ mod tests {
     fn test_invalid_rem() {
         test_execution_error(
             "'foo' % 10",
-            ExecutionError::UnsupportedBinaryOperator("rem", "foo".into(), Value::Int(10)),
+            ExecutionError::NoSuchOverload,
         );
     }
 

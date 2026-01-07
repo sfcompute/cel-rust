@@ -172,6 +172,23 @@ impl Parser {
         target: IdedExpr,
         args: Vec<IdedExpr>,
     ) -> IdedExpr {
+        // Special handling for namespace-qualified macros like cel.bind
+        // Check if target is an identifier that could be a namespace
+        if let Expr::Ident(ref namespace) = target.expr {
+            let qualified_name = format!("{}.{}", namespace, func_name);
+            if let Some(expander) = macros::find_expander(&qualified_name, None, &args) {
+                let mut helper = MacroExprHelper {
+                    helper: &mut self.helper,
+                    id,
+                };
+                return match expander(&mut helper, None, args) {
+                    Ok(expr) => expr,
+                    Err(err) => self.report_parse_error(None, err),
+                };
+            }
+        }
+
+        // Standard member call or macro
         match macros::find_expander(&func_name, Some(&target), &args) {
             None => IdedExpr {
                 id,
@@ -690,15 +707,12 @@ impl gen::CELVisitorCompat<'_> for Parser {
                 IdedExpr::default()
             }
             Some(member) => {
-                let target = self.visit(member.as_ref());
-                // If even number of NOT operations, return value unchanged
                 if ctx.ops.len() % 2 == 0 {
-                    target
-                } else {
-                    // If odd number of NOT operations, apply one NOT
-                    let op_id = self.helper.next_id(&ctx.ops[0]);
-                    self.global_call_or_macro(op_id, operators::LOGICAL_NOT.to_string(), vec![target])
+                    self.visit(member.as_ref());
                 }
+                let op_id = self.helper.next_id(&ctx.ops[0]);
+                let target = self.visit(member.as_ref());
+                self.global_call_or_macro(op_id, operators::LOGICAL_NOT.to_string(), vec![target])
             }
         }
     }
@@ -709,15 +723,12 @@ impl gen::CELVisitorCompat<'_> for Parser {
                 self.report_error::<ParseError, _>(&ctx.start(), None, "No `MemberContextAll`!")
             }
             Some(member) => {
-                let target = self.visit(member.as_ref());
-                // If even number of negations, return value unchanged
                 if ctx.ops.len() % 2 == 0 {
-                    target
-                } else {
-                    // If odd number of negations, apply one negation
-                    let op_id = self.helper.next_id(&ctx.ops[0]);
-                    self.global_call_or_macro(op_id, operators::NEGATE.to_string(), vec![target])
+                    self.visit(member.as_ref());
                 }
+                let op_id = self.helper.next_id(&ctx.ops[0]);
+                let target = self.visit(member.as_ref());
+                self.global_call_or_macro(op_id, operators::NEGATE.to_string(), vec![target])
             }
         }
     }
@@ -747,6 +758,12 @@ impl gen::CELVisitorCompat<'_> for Parser {
         if let (Some(member), Some(id), Some(op)) = (&ctx.member(), &ctx.id, &ctx.op) {
             let operand = self.visit(member.as_ref());
             let field = id.get_text();
+            // Strip backticks from escaped identifiers (e.g., `foo.bar` -> foo.bar)
+            let field = if field.starts_with('`') && field.ends_with('`') && field.len() > 1 {
+                field[1..field.len() - 1].to_string()
+            } else {
+                field
+            };
             if let Some(_opt) = &ctx.opt {
                 return if self.enable_optional_syntax {
                     let field_literal = self
@@ -931,28 +948,45 @@ impl gen::CELVisitorCompat<'_> for Parser {
     }
 
     fn visit_Int(&mut self, ctx: &IntContext<'_>) -> Self::Return {
-        let string = ctx.get_text();
         if let Some(token) = ctx.tok.as_ref() {
-            // Handle negative sign for hex literals (e.g., -0x55555555)
-            let (is_negative, string_without_sign) = if let Some(rest) = string.strip_prefix('-') {
-                (true, rest)
+            let tok_text = token.get_text();
+            let string = &tok_text;
+
+            // Handle sign separately for hex literals only
+            let (is_negative, string_to_parse) = if ctx.sign.is_some() {
+                // If there's a sign token, the number string doesn't include it
+                (true, string)
             } else {
-                (false, string.as_str())
+                // No sign token, use string as-is (may start with '-' for non-hex)
+                (false, string)
             };
 
-            let val = match if let Some(hex_string) = string_without_sign.strip_prefix("0x") {
-                i64::from_str_radix(hex_string, 16)
-            } else {
-                // Re-add negative sign for decimal parsing
+            // Parse the number
+            let val = match if let Some(hex_str) = string_to_parse.strip_prefix("0x") {
+                // For hex: parse unsigned and apply sign
+                let unsigned_val = match u64::from_str_radix(hex_str, 16) {
+                    Ok(v) => v,
+                    Err(e) => return self.report_error(token, Some(e), "invalid int literal"),
+                };
+                // Convert to signed and apply negation if needed
                 if is_negative {
-                    format!("-{}", string_without_sign).parse::<i64>()
+                    Ok(-(unsigned_val as i64))
                 } else {
-                    string_without_sign.parse::<i64>()
+                    Ok(unsigned_val as i64)
                 }
+            } else {
+                // For decimal: parse with sign included in string
+                let full_string = if is_negative {
+                    format!("-{}", string_to_parse)
+                } else {
+                    string_to_parse.to_string()
+                };
+                full_string.parse::<i64>()
             } {
-                Ok(v) => if is_negative && string_without_sign.starts_with("0x") { -v } else { v },
+                Ok(v) => v,
                 Err(e) => return self.report_error(token, Some(e), "invalid int literal"),
             };
+
             self.helper
                 .next_expr(token, Expr::Literal(CelVal::Int(val)))
         } else {
@@ -1022,42 +1056,7 @@ impl gen::CELVisitorCompat<'_> for Parser {
     fn visit_Bytes(&mut self, ctx: &BytesContext<'_>) -> Self::Return {
         if let Some(token) = ctx.tok.as_deref() {
             let string = ctx.get_text();
-
-            // Check if this is triple-quoted (need to check before slicing off 'b')
-            // Patterns: b''' b""" br''' br""" bR''' bR""" B''' B""" Br''' Br""" BR''' BR"""
-            let is_triple = string.len() > 6 &&
-                            (string.starts_with("b'''") || string.starts_with("b\"\"\"") ||
-                             string.starts_with("br'''") || string.starts_with("br\"\"\"") ||
-                             string.starts_with("bR'''") || string.starts_with("bR\"\"\"") ||
-                             string.starts_with("B'''") || string.starts_with("B\"\"\"") ||
-                             string.starts_with("Br'''") || string.starts_with("Br\"\"\"") ||
-                             string.starts_with("BR'''") || string.starts_with("BR\"\"\""));
-
-            // Check if this is a raw bytes literal (br'...' or bR'...')
-            let is_raw = string.len() > 2 && (string.chars().nth(1) == Some('r') || string.chars().nth(1) == Some('R'));
-
-            let start_index = if is_raw {
-                1  // Skip only 'b', keep 'r' and quotes for parse_bytes to detect (both br' and br''')
-            } else if is_triple {
-                4  // Skip 'b' and opening ''' for triple-quoted bytes (b''')
-            } else {
-                1  // Skip only 'b', keep quotes for parse_bytes (so it doesn't mistake content for raw prefix)
-            };
-
-            // For raw bytes, don't strip the closing quote - parse_bytes handles it
-            // For non-raw single-quoted, keep quotes for parse_bytes
-            // For non-raw triple-quoted, strip triple quotes (parse_bytes will handle content)
-            let end_offset = if is_raw {
-                0  // Keep closing quote(s) for parse_bytes to handle
-            } else if is_triple {
-                3  // Remove closing ''' for non-raw triple-quoted
-            } else {
-                0  // Keep closing quote for parse_bytes
-            };
-
-            let to_parse = &string[start_index..string.len() - end_offset];
-
-            match parse::parse_bytes(to_parse) {
+            match parse::parse_bytes(&string[2..string.len() - 1]) {
                 Ok(bytes) => self
                     .helper
                     .next_expr(token, Expr::Literal(CelVal::Bytes(bytes))),
@@ -2290,16 +2289,6 @@ ERROR: <input>:1:24: unsupported syntax '?'
                     self.dec_indent();
                     self.push("}");
                     &format!("^#{}:{}#", expr.id, "*expr.Expr_StructExpr")
-                }
-                Expr::Bind(bind_expr) => {
-                    self.push("cel.bind(");
-                    self.push(&bind_expr.var);
-                    self.push(", ");
-                    self.buffer(&bind_expr.init);
-                    self.push(", ");
-                    self.buffer(&bind_expr.result);
-                    self.push(")");
-                    &format!("^#{}:{}#", expr.id, "*expr.Expr_Bind")
                 }
             };
             self.push(e);
