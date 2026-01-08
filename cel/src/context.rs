@@ -249,6 +249,8 @@ impl Default for Context<'_> {
         ctx.add_function("hasValue", functions::optional_has_value);
         ctx.add_function("or", functions::optional_or_optional);
         ctx.add_function("orValue", functions::optional_or_value);
+        ctx.add_function("optMap", functions::optional_opt_map);
+        ctx.add_function("optFlatMap", functions::optional_opt_flat_map);
 
         #[cfg(feature = "regex")]
         ctx.add_function("matches", functions::matches);
