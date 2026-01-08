@@ -707,6 +707,7 @@ pub fn convert_int_to_enum(
 mod tests {
     use crate::context::Context;
     use crate::tests::test_script;
+    use crate::ExecutionError;
 
     fn assert_script(input: &(&str, &str)) {
         assert_eq!(test_script(input.1, None), Ok(true.into()), "{}", input.0);
@@ -1278,5 +1279,49 @@ mod tests {
         let program = crate::Program::compile("toSignedEnum(3)").unwrap();
         let result = program.execute(&context);
         assert!(result.is_err(), "Should error on value too large");
+    }
+
+    #[test]
+    fn test_has_in_ternary() {
+        // Conformance test: presence_test_with_ternary variants
+
+        // Variant 1: has() as condition (present case)
+        let result1 = test_script("has({'a': 1}.a) ? 'present' : 'absent'", None);
+        assert_eq!(result1, Ok("present".into()), "presence_test_with_ternary_1");
+
+        // Variant 2: has() as condition (absent case)
+        let result2 = test_script("has({'a': 1}.b) ? 'present' : 'absent'", None);
+        assert_eq!(result2, Ok("absent".into()), "presence_test_with_ternary_2");
+
+        // Variant 3: has() in true branch
+        let result3 = test_script("true ? has({'a': 1}.a) : false", None);
+        assert_eq!(result3, Ok(true.into()), "presence_test_with_ternary_3");
+
+        // Variant 4: has() in false branch
+        let result4 = test_script("false ? true : has({'a': 1}.a)", None);
+        assert_eq!(result4, Ok(true.into()), "presence_test_with_ternary_4");
+    }
+
+    #[test]
+    fn test_list_elem_type_exhaustive() {
+        // Conformance test: list_elem_type_exhaustive
+        // Test heterogeneous list with all() macro - should give proper error message
+        let script = "[1, 'foo', 3].all(e, e % 2 == 1)";
+        let result = test_script(script, None);
+
+        // This should produce an error when trying e % 2 on string
+        // The error should indicate the type mismatch
+        match result {
+            Err(ExecutionError::UnsupportedBinaryOperator(op, left, right)) => {
+                assert_eq!(op, "rem", "Expected 'rem' operator");
+                assert!(matches!(left, crate::objects::Value::String(_)),
+                    "Expected String on left side");
+                assert!(matches!(right, crate::objects::Value::Int(_)),
+                    "Expected Int on right side");
+            }
+            other => {
+                panic!("Expected UnsupportedBinaryOperator error, got: {:?}", other);
+            }
+        }
     }
 }
