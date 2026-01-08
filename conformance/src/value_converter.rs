@@ -1180,6 +1180,12 @@ fn convert_test_all_types_proto2_to_struct(
         fields.insert("list_value".to_string(), List(Arc::new(list_items)));
     }
 
+    // Handle repeated enum fields
+    if !msg.repeated_nested_enum.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_nested_enum.iter().map(|&v| Int(v as i64)).collect();
+        fields.insert("repeated_nested_enum".to_string(), List(Arc::new(values)));
+    }
+
     // Before returning the struct, extract extension fields from wire format
     extract_extension_fields(original_bytes, &mut fields)?;
 

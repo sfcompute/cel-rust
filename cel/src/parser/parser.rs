@@ -286,7 +286,13 @@ impl Parser {
                     continue;
                 }
                 Some(ident) => {
-                    let field_name = ident.get_text().to_string();
+                    let field_text = ident.get_text();
+                    // Strip backticks from escaped identifiers (e.g., `in` -> in)
+                    let field_name = if field_text.starts_with('`') && field_text.ends_with('`') && field_text.len() > 1 {
+                        field_text[1..field_text.len() - 1].to_string()
+                    } else {
+                        field_text.to_string()
+                    };
                     let value = self.visit(ctx.values[i].as_ref());
                     let is_optional = match (&field.opt, self.enable_optional_syntax) {
                         (Some(opt), false) => {

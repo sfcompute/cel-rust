@@ -1423,7 +1423,9 @@ impl Value {
                             }
                         }
                         ("google.protobuf.FloatValue", Value::Float(f)) => {
-                            return Value::Float(*f);
+                            // Truncate to float32 precision
+                            let f32_val = *f as f32;
+                            return Value::Float(f32_val as f64);
                         }
                         ("google.protobuf.DoubleValue", Value::Float(f)) => {
                             return Value::Float(*f);
@@ -2362,6 +2364,43 @@ impl Value {
                                 }
                             }
 
+                            // Float32 precision: convert double to float32 for single_float fields
+                            // This ensures precision loss is captured for comparison
+                            if field_expr.field == "single_float" || field_expr.field == "single_float_wrapper" {
+                                if let Value::Float(f) = value {
+                                    let f32_val = f as f32;
+                                    value = Value::Float(f32_val as f64);
+                                }
+                            }
+
+                            // Scalar and repeated fields cannot be set to null
+                            // Only message-type fields and wrapper fields can accept null
+                            if matches!(value, Value::Null) {
+                                let scalar_fields = [
+                                    "single_bool", "single_int32", "single_int64",
+                                    "single_uint32", "single_uint64", "single_float",
+                                    "single_double", "single_string", "single_bytes",
+                                    "single_sint32", "single_sint64", "single_fixed32",
+                                    "single_fixed64", "single_sfixed32", "single_sfixed64",
+                                ];
+                                if scalar_fields.contains(&field_expr.field.as_str()) {
+                                    return Err(ExecutionError::function_error(
+                                        "struct",
+                                        "unsupported field type",
+                                    ));
+                                }
+                                // Repeated fields cannot be null (except duration/timestamp handled below)
+                                if field_expr.field.starts_with("repeated_")
+                                    && !field_expr.field.starts_with("repeated_duration")
+                                    && !field_expr.field.starts_with("repeated_timestamp")
+                                {
+                                    return Err(ExecutionError::function_error(
+                                        "struct",
+                                        "unsupported field type",
+                                    ));
+                                }
+                            }
+
                             // Skip null wrapper fields - they should be equivalent to unset fields
                             // Wrapper fields conventionally end with "_wrapper"
                             if matches!(value, Value::Null) && field_expr.field.ends_with("_wrapper") {
@@ -2373,6 +2412,7 @@ impl Value {
                             if matches!(value, Value::Null)
                                 && (field_expr.field == "single_duration"
                                     || field_expr.field == "single_timestamp"
+                                    || field_expr.field == "single_nested_message"
                                     || field_expr.field.starts_with("repeated_duration")
                                     || field_expr.field.starts_with("repeated_timestamp")) {
                                 continue;
@@ -2471,11 +2511,46 @@ impl Value {
                     return Ok(Value::Null);
                 }
 
-                Value::Struct(Struct {
-                    type_name: Arc::new(qualified_type_name),
+                // Validate google.protobuf.Any requires a type_url field
+                // An empty Any{} is invalid because it cannot identify the contained type
+                if qualified_type_name == "google.protobuf.Any" {
+                    let type_url = fields.get("type_url");
+                    let has_valid_type_url = match type_url {
+                        Some(Value::String(s)) => !s.is_empty(),
+                        _ => false,
+                    };
+                    if !has_valid_type_url {
+                        return Err(ExecutionError::function_error("type", "conversion"));
+                    }
+                }
+
+                // Create the struct
+                let result = Value::Struct(Struct {
+                    type_name: Arc::new(qualified_type_name.clone()),
                     fields: Arc::new(fields),
-                })
-                .into()
+                });
+
+                // Unwrap protobuf wrapper types (Int32Value, Int64Value, etc.) to their primitive values
+                // This ensures that expressions like `google.protobuf.Int32Value{value: -123}` evaluate
+                // to just `-123`, and subsequent `.value` access will fail (since -123 is not a struct)
+                if is_wrapper_type(&qualified_type_name) {
+                    if let Value::Struct(ref s) = result {
+                        if let Some(value) = s.fields.get("value") {
+                            // For FloatValue, truncate to float32 precision
+                            if qualified_type_name == "google.protobuf.FloatValue" {
+                                if let Value::Float(f) = value {
+                                    return Ok(Value::Float((*f as f32) as f64));
+                                }
+                            }
+                            return Ok(value.clone());
+                        } else {
+                            // No value field set - return the default for this wrapper type
+                            return Ok(get_wrapper_default(&qualified_type_name));
+                        }
+                    }
+                }
+
+                result.into()
             }
             Expr::Bind(bind) => {
                 // Evaluate the initialization expression
