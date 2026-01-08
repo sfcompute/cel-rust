@@ -620,6 +620,7 @@ impl PartialOrd for Value {
             (Value::UInt(a), Value::UInt(b)) => Some(a.cmp(b)),
             (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
             (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
+            (Value::Bytes(a), Value::Bytes(b)) => Some(a.cmp(b)),
             (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
             (Value::Null, Value::Null) => Some(Ordering::Equal),
             #[cfg(feature = "chrono")]
@@ -897,6 +898,20 @@ impl Value {
                                 (Value::List(items), Value::UInt(idx)) => {
                                     if (idx as usize) < items.len() {
                                         items[idx as usize].clone().into()
+                                    } else {
+                                        Err(ExecutionError::IndexOutOfBounds(idx.into()))
+                                    }
+                                }
+                                (Value::Bytes(bytes), Value::Int(idx)) => {
+                                    if idx >= 0 && (idx as usize) < bytes.len() {
+                                        Ok(Value::Bytes(Arc::new(vec![bytes[idx as usize]])))
+                                    } else {
+                                        Err(ExecutionError::IndexOutOfBounds(idx.into()))
+                                    }
+                                }
+                                (Value::Bytes(bytes), Value::UInt(idx)) => {
+                                    if (idx as usize) < bytes.len() {
+                                        Ok(Value::Bytes(Arc::new(vec![bytes[idx as usize]])))
                                     } else {
                                         Err(ExecutionError::IndexOutOfBounds(idx.into()))
                                     }
@@ -1332,6 +1347,19 @@ impl ops::Add<Value> for Value {
                 // `l` is replaced with a clone otherwise.
                 Arc::make_mut(&mut l).push_str(&r);
                 Ok(Value::String(l))
+            }
+            (Value::Bytes(mut l), Value::Bytes(mut r)) => {
+                // If this is the only reference to `l`, we can append to it in place.
+                // `l` is replaced with a clone otherwise.
+                let l_vec = Arc::make_mut(&mut l);
+
+                // Likewise, if this is the only reference to `r`, we can move its values
+                // instead of cloning them.
+                match Arc::get_mut(&mut r) {
+                    Some(r) => l_vec.append(r),
+                    None => l_vec.extend_from_slice(&r),
+                }
+                Ok(Value::Bytes(l))
             }
             #[cfg(feature = "chrono")]
             (Value::Duration(l), Value::Duration(r)) => l
