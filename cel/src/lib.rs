@@ -15,7 +15,7 @@ pub use common::ast::IdedExpr;
 use common::ast::SelectExpr;
 pub use context::Context;
 pub use functions::FunctionContext;
-pub use objects::{EnumType, ResolveResult, Value};
+pub use objects::{EnumType, ResolveResult, Struct, Value};
 use parser::{Expression, ExpressionReferences, Parser};
 pub use parser::{ParseError, ParseErrors};
 pub mod functions;
@@ -36,6 +36,8 @@ pub use ser::SerializationError;
 mod json;
 #[cfg(feature = "json")]
 pub use json::ConvertToJsonError;
+
+pub mod proto_compare;
 
 use magic::FromContext;
 

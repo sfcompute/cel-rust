@@ -72,6 +72,41 @@ impl Map {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Struct {
+    pub type_name: Arc<String>,
+    pub fields: Arc<HashMap<String, Value>>,
+}
+
+impl PartialEq for Struct {
+    fn eq(&self, other: &Self) -> bool {
+        // Structs are equal if they have the same type name and all fields are equal
+        if self.type_name != other.type_name {
+            return false;
+        }
+        if self.fields.len() != other.fields.len() {
+            return false;
+        }
+        for (key, value) in self.fields.iter() {
+            match other.fields.get(key) {
+                Some(other_value) => {
+                    if value != other_value {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        true
+    }
+}
+
+impl PartialOrd for Struct {
+    fn partial_cmp(&self, _: &Self) -> Option<Ordering> {
+        None
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Hash, Ord, Clone, PartialOrd)]
 pub enum Key {
     Int(i64),
@@ -387,6 +422,7 @@ impl TryIntoValue for Value {
 pub enum Value {
     List(Arc<Vec<Value>>),
     Map(Map),
+    Struct(Struct),
 
     Function(Arc<String>, Option<Box<Value>>),
 
@@ -410,6 +446,7 @@ impl Debug for Value {
         match self {
             Value::List(l) => write!(f, "List({:?})", l),
             Value::Map(m) => write!(f, "Map({:?})", m),
+            Value::Struct(s) => write!(f, "Struct({:?})", s),
             Value::Function(name, func) => write!(f, "Function({:?}, {:?})", name, func),
             Value::Int(i) => write!(f, "Int({:?})", i),
             Value::UInt(u) => write!(f, "UInt({:?})", u),
@@ -446,6 +483,7 @@ impl From<CelVal> for Value {
 pub enum ValueType {
     List,
     Map,
+    Struct,
     Function,
     Int,
     UInt,
@@ -464,6 +502,7 @@ impl Display for ValueType {
         match self {
             ValueType::List => write!(f, "list"),
             ValueType::Map => write!(f, "map"),
+            ValueType::Struct => write!(f, "struct"),
             ValueType::Function => write!(f, "function"),
             ValueType::Int => write!(f, "int"),
             ValueType::UInt => write!(f, "uint"),
@@ -484,6 +523,7 @@ impl Value {
         match self {
             Value::List(_) => ValueType::List,
             Value::Map(_) => ValueType::Map,
+            Value::Struct(_) => ValueType::Struct,
             Value::Function(_, _) => ValueType::Function,
             Value::Int(_) => ValueType::Int,
             Value::UInt(_) => ValueType::UInt,
@@ -504,6 +544,7 @@ impl Value {
         match self {
             Value::List(v) => v.is_empty(),
             Value::Map(v) => v.map.is_empty(),
+            Value::Struct(v) => v.fields.is_empty(),
             Value::Int(0) => true,
             Value::UInt(0) => true,
             Value::Float(f) => *f == 0.0,
@@ -535,6 +576,7 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Map(a), Value::Map(b)) => a == b,
+            (Value::Struct(a), Value::Struct(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Function(a1, a2), Value::Function(b1, b2)) => a1 == b1 && a2 == b2,
             (Value::Int(a), Value::Int(b)) => a == b,
