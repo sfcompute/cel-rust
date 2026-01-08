@@ -243,10 +243,24 @@ pub fn uint(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             .map(Value::UInt)
             .map_err(|e| ftx.error(format!("string parse error: {e}")))?,
         Value::Float(v) => {
-            if v > u64::MAX as f64 || v < u64::MIN as f64 {
+            // Check for NaN and infinity
+            if !v.is_finite() {
+                return Err(ftx.error("cannot convert non-finite value to uint"));
+            }
+            // Check if value is negative
+            if v < 0.0 {
                 return Err(ftx.error("unsigned integer overflow"));
             }
-            Value::UInt(v as u64)
+            // More strict range checking for float to uint conversion
+            if v > u64::MAX as f64 {
+                return Err(ftx.error("unsigned integer overflow"));
+            }
+            // Additional check: ensure the float value, when truncated, is within bounds
+            let truncated = v.trunc();
+            if truncated < 0.0 || truncated > u64::MAX as f64 {
+                return Err(ftx.error("unsigned integer overflow"));
+            }
+            Value::UInt(truncated as u64)
         }
         Value::Int(v) => Value::UInt(
             v.try_into()
@@ -265,10 +279,22 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             .map(Value::Int)
             .map_err(|e| ftx.error(format!("string parse error: {e}")))?,
         Value::Float(v) => {
+            // Check for NaN and infinity
+            if !v.is_finite() {
+                return Err(ftx.error("cannot convert non-finite value to int"));
+            }
+            // More strict range checking for float to int conversion
+            // We need to ensure the value fits within i64 range and doesn't lose precision
             if v > i64::MAX as f64 || v < i64::MIN as f64 {
                 return Err(ftx.error("integer overflow"));
             }
-            Value::Int(v as i64)
+            // Additional check: ensure the float value, when truncated, is within bounds
+            // This handles edge cases near the limits
+            let truncated = v.trunc();
+            if truncated > i64::MAX as f64 || truncated < i64::MIN as f64 {
+                return Err(ftx.error("integer overflow"));
+            }
+            Value::Int(truncated as i64)
         }
         Value::Int(v) => Value::Int(v),
         Value::UInt(v) => Value::Int(v.try_into().map_err(|_| ftx.error("integer overflow"))?),

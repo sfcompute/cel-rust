@@ -1105,18 +1105,19 @@ impl Value {
 
         // This will always either be because we're trying to access
         // a property on self, or a method on self.
-        let child = match self {
-            Value::Map(ref m) => m.map.get(&name.clone().into()).cloned(),
-            _ => None,
-        };
-
-        // If the property is both an attribute and a method, then we
-        // give priority to the property. Maybe we can implement lookahead
-        // to see if the next token is a function call?
-        if let Some(child) = child {
-            child.into()
-        } else {
-            ExecutionError::NoSuchKey(name.clone()).into()
+        match self {
+            Value::Map(ref m) => {
+                // For maps, look up the field and return NoSuchKey if not found
+                m.map.get(&name.clone().into())
+                    .cloned()
+                    .ok_or_else(|| ExecutionError::NoSuchKey(name.clone()))
+                    .into()
+            }
+            _ => {
+                // For non-map types, accessing a field is always an error
+                // Return NoSuchKey to indicate the field doesn't exist on this type
+                ExecutionError::NoSuchKey(name.clone()).into()
+            }
         }
     }
 
