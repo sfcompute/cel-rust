@@ -339,6 +339,32 @@ impl<'a> TryFrom<&'a Value> for &'a OptionalValue {
     }
 }
 
+/// Represents an enum type with its valid range of values
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EnumType {
+    /// Fully qualified name of the enum type (e.g., "google.expr.proto3.test.GlobalEnum")
+    pub type_name: Arc<String>,
+    /// Minimum valid integer value for this enum
+    pub min_value: i32,
+    /// Maximum valid integer value for this enum
+    pub max_value: i32,
+}
+
+impl EnumType {
+    pub fn new(type_name: String, min_value: i32, max_value: i32) -> Self {
+        EnumType {
+            type_name: Arc::new(type_name),
+            min_value,
+            max_value,
+        }
+    }
+
+    /// Check if a value is within the valid range for this enum
+    pub fn is_valid_value(&self, value: i32) -> bool {
+        value >= self.min_value && value <= self.max_value
+    }
+}
+
 pub trait TryIntoValue {
     type Error: std::error::Error + 'static + Send + Sync;
     fn try_into_value(self) -> Result<Value, Self::Error>;

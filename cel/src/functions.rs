@@ -483,6 +483,43 @@ pub fn min(Arguments(args): Arguments) -> Result<Value> {
         .cloned()
 }
 
+/// Converts an integer value to an enum type with range validation.
+///
+/// This function validates that the integer value is within the valid range
+/// defined by the enum type's min and max values. If the value is out of range,
+/// it returns an error.
+///
+/// # Arguments
+/// * `ftx` - Function context
+/// * `enum_type` - The enum type definition containing min/max range
+/// * `value` - The integer value to convert
+///
+/// # Returns
+/// * `Ok(Value::Int(value))` if the value is within range
+/// * `Err(ExecutionError)` if the value is out of range
+pub fn convert_int_to_enum(
+    ftx: &FunctionContext,
+    enum_type: Arc<crate::objects::EnumType>,
+    value: i64,
+) -> Result<Value> {
+    // Convert i64 to i32 for range checking
+    let value_i32 = value.try_into().map_err(|_| {
+        ftx.error(format!(
+            "value {} out of range for enum type '{}'",
+            value, enum_type.type_name
+        ))
+    })?;
+
+    if !enum_type.is_valid_value(value_i32) {
+        return Err(ftx.error(format!(
+            "value {} out of range for enum type '{}' (valid range: {}..{})",
+            value, enum_type.type_name, enum_type.min_value, enum_type.max_value
+        )));
+    }
+
+    Ok(Value::Int(value))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::context::Context;
@@ -918,5 +955,112 @@ mod tests {
         ]
         .iter()
         .for_each(assert_error)
+    }
+
+    #[test]
+    fn test_enum_conversion_valid_range() {
+        use crate::objects::EnumType;
+        use std::sync::Arc;
+
+        // Create an enum type with range 0..2 (e.g., proto enum with values 0, 1, 2)
+        let enum_type = Arc::new(EnumType::new("test.TestEnum".to_string(), 0, 2));
+
+        let mut context = Context::default();
+        context.add_function("toTestEnum", {
+            let enum_type = enum_type.clone();
+            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+                super::convert_int_to_enum(ftx, enum_type.clone(), value)
+            }
+        });
+
+        // Valid conversions within range
+        let program = crate::Program::compile("toTestEnum(0) == 0").unwrap();
+        assert_eq!(program.execute(&context).unwrap(), true.into());
+
+        let program = crate::Program::compile("toTestEnum(1) == 1").unwrap();
+        assert_eq!(program.execute(&context).unwrap(), true.into());
+
+        let program = crate::Program::compile("toTestEnum(2) == 2").unwrap();
+        assert_eq!(program.execute(&context).unwrap(), true.into());
+    }
+
+    #[test]
+    fn test_enum_conversion_too_big() {
+        use crate::objects::EnumType;
+        use std::sync::Arc;
+
+        // Create an enum type with range 0..2
+        let enum_type = Arc::new(EnumType::new("test.TestEnum".to_string(), 0, 2));
+
+        let mut context = Context::default();
+        context.add_function("toTestEnum", {
+            let enum_type = enum_type.clone();
+            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+                super::convert_int_to_enum(ftx, enum_type.clone(), value)
+            }
+        });
+
+        // Invalid conversion - value too large
+        let program = crate::Program::compile("toTestEnum(100)").unwrap();
+        let result = program.execute(&context);
+        assert!(result.is_err(), "Should error on value too large");
+        assert!(result.unwrap_err().to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn test_enum_conversion_too_negative() {
+        use crate::objects::EnumType;
+        use std::sync::Arc;
+
+        // Create an enum type with range 0..2
+        let enum_type = Arc::new(EnumType::new("test.TestEnum".to_string(), 0, 2));
+
+        let mut context = Context::default();
+        context.add_function("toTestEnum", {
+            let enum_type = enum_type.clone();
+            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+                super::convert_int_to_enum(ftx, enum_type.clone(), value)
+            }
+        });
+
+        // Invalid conversion - value too negative
+        let program = crate::Program::compile("toTestEnum(-10)").unwrap();
+        let result = program.execute(&context);
+        assert!(result.is_err(), "Should error on value too negative");
+        assert!(result.unwrap_err().to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn test_enum_conversion_negative_range() {
+        use crate::objects::EnumType;
+        use std::sync::Arc;
+
+        // Create an enum type with negative range -2..2
+        let enum_type = Arc::new(EnumType::new("test.SignedEnum".to_string(), -2, 2));
+
+        let mut context = Context::default();
+        context.add_function("toSignedEnum", {
+            let enum_type = enum_type.clone();
+            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+                super::convert_int_to_enum(ftx, enum_type.clone(), value)
+            }
+        });
+
+        // Valid negative values
+        let program = crate::Program::compile("toSignedEnum(-2) == -2").unwrap();
+        assert_eq!(program.execute(&context).unwrap(), true.into());
+
+        let program = crate::Program::compile("toSignedEnum(-1) == -1").unwrap();
+        assert_eq!(program.execute(&context).unwrap(), true.into());
+
+        // Invalid - too negative
+        let program = crate::Program::compile("toSignedEnum(-3)").unwrap();
+        let result = program.execute(&context);
+        assert!(result.is_err(), "Should error on value too negative");
+
+        // Invalid - too positive
+        let program = crate::Program::compile("toSignedEnum(3)").unwrap();
+        let result = program.execute(&context);
+        assert!(result.is_err(), "Should error on value too large");
     }
 }
