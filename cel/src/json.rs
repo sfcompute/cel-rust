@@ -47,6 +47,13 @@ impl Value {
                 }
                 serde_json::Value::Object(obj)
             }
+            Value::Struct(ref s) => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in s.fields.iter() {
+                    obj.insert(k.clone(), v.json()?);
+                }
+                serde_json::Value::Object(obj)
+            }
             Value::Int(i) => i.into(),
             Value::UInt(u) => u.into(),
             Value::Float(f) => f.into(),
