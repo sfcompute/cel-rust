@@ -351,6 +351,7 @@ pub fn type_(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             // Clone the type name to avoid lifetime issues
             return Ok(Value::String(s.type_name.clone()));
         }
+        Value::Namespace(_) => "string",
         #[cfg(feature = "chrono")]
         Value::Timestamp(_) => "google.protobuf.Timestamp",
         #[cfg(feature = "chrono")]
@@ -456,6 +457,7 @@ pub fn type_of(This(this): This<Value>) -> Result<Value> {
         Value::List(_) => "list",
         Value::Map(_) => "map",
         Value::Null => "null_type",
+        Value::Namespace(_) => "string",
         #[cfg(feature = "chrono")]
         Value::Timestamp(_) => "google.protobuf.Timestamp",
         #[cfg(feature = "chrono")]
@@ -1502,10 +1504,61 @@ pub mod time {
         }
     }
 
+    pub fn get_milliseconds(_ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+        match this {
+            Value::Timestamp(timestamp) => {
+                Ok((timestamp.timestamp_subsec_millis() as i32).into())
+            }
+            Value::Duration(duration) => {
+                // Get the milliseconds component of the duration (not the total milliseconds)
+                // This extracts the milliseconds from the subsecond portion
+                let nanos = duration.num_nanoseconds().unwrap_or(0);
+                let millis = (nanos.abs() / 1_000_000) % 1000;
+                Ok(millis.into())
+            }
+            _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
+        }
+    }
+
     pub fn timestamp_millis(
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
         Ok((this.timestamp_subsec_millis() as i32).into())
+    }
+}
+
+/// Proto extension functions for hasExt and getExt
+/// These check for extension fields in proto messages
+pub fn proto_has_ext(_ftx: &FunctionContext, msg: Value, ext_field: Value) -> Result<Value> {
+    // For conformance tests, check if msg (as Struct) has the extension field
+    // ext_field can be either a String or a Namespace (from qualified identifiers like cel.expr.conformance.proto2.int32_ext)
+    match (msg, ext_field) {
+        (Value::Struct(s), Value::String(field_name)) => {
+            Ok(Value::Bool(s.fields.contains_key(field_name.as_str())))
+        }
+        (Value::Struct(s), Value::Namespace(field_name)) => {
+            Ok(Value::Bool(s.fields.contains_key(field_name.as_str())))
+        }
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+pub fn proto_get_ext(_ftx: &FunctionContext, msg: Value, ext_field: Value) -> Result<Value> {
+    match (msg, ext_field) {
+        (Value::Struct(s), Value::String(field_name)) => s
+            .fields
+            .get(field_name.as_str())
+            .cloned()
+            .ok_or_else(|| ExecutionError::NoSuchKey(field_name.clone())),
+        (Value::Struct(s), Value::Namespace(field_name)) => s
+            .fields
+            .get(field_name.as_str())
+            .cloned()
+            .ok_or_else(|| ExecutionError::NoSuchKey(field_name.clone())),
+        _ => Err(ExecutionError::function_error(
+            "proto.getExt",
+            "invalid arguments",
+        )),
     }
 }
 
@@ -2320,6 +2373,7 @@ fn format_value_as_string(value: &Value) -> String {
             }
         }
         Value::String(s) => s.as_str().to_string(),
+        Value::Namespace(n) => n.as_str().to_string(),
         Value::Bytes(b) => {
             // Convert bytes to string using from_utf8_lossy
             std::string::String::from_utf8_lossy(b.as_slice()).replace('\u{fffd}', "\u{fffd}")

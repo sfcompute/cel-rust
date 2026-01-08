@@ -104,6 +104,17 @@ impl<'a> Context<'a> {
         self
     }
 
+    /// Get the container prefix for type name qualification
+    pub fn get_container(&self) -> Option<&str> {
+        match self {
+            Context::Root { container, .. } => container.as_deref(),
+            Context::Child { container, parent, .. } => {
+                // Child context can have its own container, or inherit from parent
+                container.as_deref().or_else(|| parent.get_container())
+            }
+        }
+    }
+
     pub fn get_variable<S>(&self, name: S) -> Result<Value, ExecutionError>
     where
         S: AsRef<str>,
@@ -327,12 +338,10 @@ impl Default for Context<'_> {
         ctx.add_function("upperAscii", functions::upper_ascii);
         ctx.add_function("reverse", functions::reverse);
         ctx.add_function("format", functions::format);
+
+        // Proto extension functions
         ctx.add_function("proto.hasExt", functions::proto_has_ext);
         ctx.add_function("proto.getExt", functions::proto_get_ext);
-
-        // Add 'cel' namespace for extension field identifiers
-        // The Namespace type allows chaining field access like cel.expr.conformance.proto2.int32_ext
-        ctx.add_variable("cel", Value::Namespace(Arc::new("cel".to_string())));
 
         ctx.add_variable("type", Value::String(Arc::new("type".to_string())));
         ctx.add_variable("null_type", Value::String(Arc::new("null_type".to_string())));
@@ -350,6 +359,9 @@ impl Default for Context<'_> {
         // Google protobuf type constants
         ctx.add_variable("google.protobuf.Timestamp", Value::String(Arc::new("google.protobuf.Timestamp".to_string())));
         ctx.add_variable("google.protobuf.Duration", Value::String(Arc::new("google.protobuf.Duration".to_string())));
+
+        // Namespace for proto extensions (e.g., cel.expr.conformance.proto2.int32_ext)
+        ctx.add_variable("cel", Value::Namespace(Arc::new("cel".to_string())));
 
         #[cfg(feature = "regex")]
         ctx.add_function("matches", functions::matches);

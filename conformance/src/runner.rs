@@ -280,6 +280,112 @@ impl ConformanceRunner {
         // Add container if specified
         if !test.container.is_empty() {
             context = context.with_container(test.container.clone());
+
+            // Add proto type names and enum types for container-aware resolution
+            for (type_name, _type_value) in get_container_type_names(&test.container) {
+                // Register enum types as both functions and maps
+                if type_name.contains("Enum") || type_name == "google.protobuf.NullValue" {
+                    // Create factory function to generate enum constructors
+                    let type_name_clone = type_name.clone();
+                    let create_enum_constructor = move |_ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
+                        match &value {
+                            cel::objects::Value::String(name) => {
+                                // Convert enum name to integer value
+                                let enum_value = get_enum_value_by_name(&type_name_clone, name.as_str())
+                                    .ok_or_else(|| cel::ExecutionError::function_error("enum", "invalid"))?;
+                                Ok(cel::objects::Value::Int(enum_value))
+                            }
+                            _ => {
+                                // For non-string values (like integers), return as-is
+                                Ok(value)
+                            }
+                        }
+                    };
+
+                    // Extract short name (e.g., "GlobalEnum" from "cel.expr.conformance.proto2.GlobalEnum")
+                    if let Some(short_name) = type_name.rsplit('.').next() {
+                        context.add_function(short_name, create_enum_constructor);
+                    }
+
+                    // For TestAllTypes.NestedEnum
+                    if type_name.contains("TestAllTypes.NestedEnum") {
+                        // Also register with parent prefix
+                        let type_name_clone2 = type_name.clone();
+                        let create_enum_constructor2 = move |_ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
+                            match &value {
+                                cel::objects::Value::String(name) => {
+                                    let enum_value = get_enum_value_by_name(&type_name_clone2, name.as_str())
+                                        .ok_or_else(|| cel::ExecutionError::function_error("enum", "invalid"))?;
+                                    Ok(cel::objects::Value::Int(enum_value))
+                                }
+                                _ => Ok(value)
+                            }
+                        };
+                        context.add_function("TestAllTypes.NestedEnum", create_enum_constructor2);
+
+                        // Also register TestAllTypes as a map with NestedEnum field
+                        let mut nested_enum_map = std::collections::HashMap::new();
+                        nested_enum_map.insert(
+                            cel::objects::Key::String(Arc::new("FOO".to_string())),
+                            cel::objects::Value::Int(0),
+                        );
+                        nested_enum_map.insert(
+                            cel::objects::Key::String(Arc::new("BAR".to_string())),
+                            cel::objects::Value::Int(1),
+                        );
+                        nested_enum_map.insert(
+                            cel::objects::Key::String(Arc::new("BAZ".to_string())),
+                            cel::objects::Value::Int(2),
+                        );
+
+                        let mut test_all_types_fields = std::collections::HashMap::new();
+                        test_all_types_fields.insert(
+                            cel::objects::Key::String(Arc::new("NestedEnum".to_string())),
+                            cel::objects::Value::Map(cel::objects::Map {
+                                map: Arc::new(nested_enum_map),
+                            }),
+                        );
+
+                        context.add_variable("TestAllTypes", cel::objects::Value::Map(cel::objects::Map {
+                            map: Arc::new(test_all_types_fields),
+                        }));
+                    }
+
+                    // For GlobalEnum - register as a map with enum values
+                    if type_name.contains("GlobalEnum") && !type_name.contains("TestAllTypes") {
+                        let mut global_enum_map = std::collections::HashMap::new();
+                        global_enum_map.insert(
+                            cel::objects::Key::String(Arc::new("GOO".to_string())),
+                            cel::objects::Value::Int(0),
+                        );
+                        global_enum_map.insert(
+                            cel::objects::Key::String(Arc::new("GAR".to_string())),
+                            cel::objects::Value::Int(1),
+                        );
+                        global_enum_map.insert(
+                            cel::objects::Key::String(Arc::new("GAZ".to_string())),
+                            cel::objects::Value::Int(2),
+                        );
+
+                        context.add_variable("GlobalEnum", cel::objects::Value::Map(cel::objects::Map {
+                            map: Arc::new(global_enum_map),
+                        }));
+                    }
+
+                    // For NullValue - register as a map with NULL_VALUE
+                    if type_name == "google.protobuf.NullValue" {
+                        let mut null_value_map = std::collections::HashMap::new();
+                        null_value_map.insert(
+                            cel::objects::Key::String(Arc::new("NULL_VALUE".to_string())),
+                            cel::objects::Value::Int(0),
+                        );
+
+                        context.add_variable("NullValue", cel::objects::Value::Map(cel::objects::Map {
+                            map: Arc::new(null_value_map),
+                        }));
+                    }
+                }
+            }
         }
 
         if !test.bindings.is_empty() {
