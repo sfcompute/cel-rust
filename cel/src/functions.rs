@@ -172,14 +172,67 @@ pub fn bytes(value: Arc<String>) -> Result<Value> {
 // Performs a type conversion on the target.
 pub fn double(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     Ok(match this {
-        Value::String(v) => v
-            .parse::<f64>()
-            .map(Value::Float)
-            .map_err(|e| ftx.error(format!("string parse error: {e}")))?,
+        Value::String(v) => {
+            let parsed = v
+                .parse::<f64>()
+                .map_err(|e| ftx.error(format!("string parse error: {e}")))?;
+
+            // Handle special string values
+            if v.eq_ignore_ascii_case("nan") {
+                Value::Float(f64::NAN)
+            } else if v.eq_ignore_ascii_case("inf") || v.eq_ignore_ascii_case("infinity") || v.as_str() == "+inf" {
+                Value::Float(f64::INFINITY)
+            } else if v.eq_ignore_ascii_case("-inf") || v.eq_ignore_ascii_case("-infinity") {
+                Value::Float(f64::NEG_INFINITY)
+            } else {
+                Value::Float(parsed)
+            }
+        }
         Value::Float(v) => Value::Float(v),
         Value::Int(v) => Value::Float(v as f64),
         Value::UInt(v) => Value::Float(v as f64),
         v => return Err(ftx.error(format!("cannot convert {v:?} to double"))),
+    })
+}
+
+// Performs a type conversion on the target, respecting f32 precision and range.
+pub fn float(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::String(v) => {
+            // Parse as f64 first to handle special values and range
+            let parsed_f64 = v
+                .parse::<f64>()
+                .map_err(|e| ftx.error(format!("string parse error: {e}")))?;
+
+            // Handle special string values
+            let value_f64 = if v.eq_ignore_ascii_case("nan") {
+                f64::NAN
+            } else if v.eq_ignore_ascii_case("inf") || v.eq_ignore_ascii_case("infinity") || v.as_str() == "+inf" {
+                f64::INFINITY
+            } else if v.eq_ignore_ascii_case("-inf") || v.eq_ignore_ascii_case("-infinity") {
+                f64::NEG_INFINITY
+            } else {
+                parsed_f64
+            };
+
+            // Convert to f32 and back to f64 to apply f32 precision and range rules
+            let as_f32 = value_f64 as f32;
+            Value::Float(as_f32 as f64)
+        }
+        Value::Float(v) => {
+            // Apply f32 precision and range rules
+            let as_f32 = v as f32;
+            Value::Float(as_f32 as f64)
+        }
+        Value::Int(v) => {
+            let as_f32 = v as f32;
+            Value::Float(as_f32 as f64)
+        }
+        Value::UInt(v) => {
+            let as_f32 = v as f32;
+            Value::Float(as_f32 as f64)
+        }
+        v => return Err(ftx.error(format!("cannot convert {v:?} to float"))),
     })
 }
 
@@ -191,10 +244,24 @@ pub fn uint(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             .map(Value::UInt)
             .map_err(|e| ftx.error(format!("string parse error: {e}")))?,
         Value::Float(v) => {
-            if v > u64::MAX as f64 || v < u64::MIN as f64 {
+            // Check for NaN and infinity
+            if !v.is_finite() {
+                return Err(ftx.error("cannot convert non-finite value to uint"));
+            }
+            // Check if value is negative
+            if v < 0.0 {
                 return Err(ftx.error("unsigned integer overflow"));
             }
-            Value::UInt(v as u64)
+            // More strict range checking for float to uint conversion
+            if v > u64::MAX as f64 {
+                return Err(ftx.error("unsigned integer overflow"));
+            }
+            // Additional check: ensure the float value, when truncated, is within bounds
+            let truncated = v.trunc();
+            if truncated < 0.0 || truncated > u64::MAX as f64 {
+                return Err(ftx.error("unsigned integer overflow"));
+            }
+            Value::UInt(truncated as u64)
         }
         Value::Int(v) => Value::UInt(
             v.try_into()
@@ -213,10 +280,22 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             .map(Value::Int)
             .map_err(|e| ftx.error(format!("string parse error: {e}")))?,
         Value::Float(v) => {
+            // Check for NaN and infinity
+            if !v.is_finite() {
+                return Err(ftx.error("cannot convert non-finite value to int"));
+            }
+            // More strict range checking for float to int conversion
+            // We need to ensure the value fits within i64 range and doesn't lose precision
             if v > i64::MAX as f64 || v < i64::MIN as f64 {
                 return Err(ftx.error("integer overflow"));
             }
-            Value::Int(v as i64)
+            // Additional check: ensure the float value, when truncated, is within bounds
+            // This handles edge cases near the limits
+            let truncated = v.trunc();
+            if truncated > i64::MAX as f64 || truncated < i64::MIN as f64 {
+                return Err(ftx.error("integer overflow"));
+            }
+            Value::Int(truncated as i64)
         }
         Value::Int(v) => Value::Int(v),
         Value::UInt(v) => Value::Int(v.try_into().map_err(|_| ftx.error("integer overflow"))?),
@@ -370,6 +449,62 @@ pub mod time {
             .map_err(|e| ExecutionError::function_error("timestamp", e.to_string()))
     }
 
+    /// Parse a timezone string and convert a timestamp to that timezone.
+    /// Supports fixed offset format like "+05:30" or "-08:00", or "UTC"/"Z".
+    fn parse_timezone<Tz: chrono::TimeZone>(
+        tz_str: &str,
+        dt: chrono::DateTime<Tz>,
+    ) -> Option<chrono::DateTime<chrono::FixedOffset>>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        // Handle UTC special case
+        if tz_str == "UTC" || tz_str == "Z" {
+            return Some(dt.with_timezone(&chrono::Utc).fixed_offset());
+        }
+
+        // Try to parse as fixed offset (e.g., "+05:30", "-08:00")
+        if let Some(offset) = parse_fixed_offset(tz_str) {
+            return Some(dt.with_timezone(&offset));
+        }
+
+        None
+    }
+
+    /// Parse a fixed offset timezone string like "+05:30" or "-08:00"
+    fn parse_fixed_offset(tz_str: &str) -> Option<chrono::FixedOffset> {
+        if tz_str.len() < 3 {
+            return None;
+        }
+
+        let sign = match tz_str.chars().next()? {
+            '+' => 1,
+            '-' => -1,
+            _ => return None,
+        };
+
+        let rest = &tz_str[1..];
+        let parts: Vec<&str> = rest.split(':').collect();
+
+        let (hours, minutes) = match parts.len() {
+            1 => {
+                // Format: "+05" or "-08"
+                let h = parts[0].parse::<i32>().ok()?;
+                (h, 0)
+            }
+            2 => {
+                // Format: "+05:30" or "-08:00"
+                let h = parts[0].parse::<i32>().ok()?;
+                let m = parts[1].parse::<i32>().ok()?;
+                (h, m)
+            }
+            _ => return None,
+        };
+
+        let total_seconds = sign * (hours * 3600 + minutes * 60);
+        chrono::FixedOffset::east_opt(total_seconds)
+    }
+
     pub fn timestamp_year(
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
@@ -394,15 +529,39 @@ pub mod time {
     }
 
     pub fn timestamp_month_day(
+        ftx: &crate::FunctionContext,
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
-        Ok((this.day0() as i32).into())
+        let dt = if ftx.args.is_empty() {
+            this.with_timezone(&chrono::Utc).fixed_offset()
+        } else {
+            let tz_str = ftx.resolve(ftx.args[0].clone())?;
+            let tz_str = match tz_str {
+                Value::String(s) => s,
+                _ => return Err(ftx.error("timezone must be a string")),
+            };
+            parse_timezone(&tz_str, this)
+                .ok_or_else(|| ftx.error(format!("invalid timezone: {}", tz_str)))?
+        };
+        Ok((dt.day0() as i32).into())
     }
 
     pub fn timestamp_date(
+        ftx: &crate::FunctionContext,
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
-        Ok((this.day() as i32).into())
+        let dt = if ftx.args.is_empty() {
+            this.with_timezone(&chrono::Utc).fixed_offset()
+        } else {
+            let tz_str = ftx.resolve(ftx.args[0].clone())?;
+            let tz_str = match tz_str {
+                Value::String(s) => s,
+                _ => return Err(ftx.error("timezone must be a string")),
+            };
+            parse_timezone(&tz_str, this)
+                .ok_or_else(|| ftx.error(format!("invalid timezone: {}", tz_str)))?
+        };
+        Ok((dt.day() as i32).into())
     }
 
     pub fn timestamp_weekday(
@@ -412,15 +571,39 @@ pub mod time {
     }
 
     pub fn timestamp_hours(
+        ftx: &crate::FunctionContext,
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
-        Ok((this.hour() as i32).into())
+        let dt = if ftx.args.is_empty() {
+            this.with_timezone(&chrono::Utc).fixed_offset()
+        } else {
+            let tz_str = ftx.resolve(ftx.args[0].clone())?;
+            let tz_str = match tz_str {
+                Value::String(s) => s,
+                _ => return Err(ftx.error("timezone must be a string")),
+            };
+            parse_timezone(&tz_str, this)
+                .ok_or_else(|| ftx.error(format!("invalid timezone: {}", tz_str)))?
+        };
+        Ok((dt.hour() as i32).into())
     }
 
     pub fn timestamp_minutes(
+        ftx: &crate::FunctionContext,
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
-        Ok((this.minute() as i32).into())
+        let dt = if ftx.args.is_empty() {
+            this.with_timezone(&chrono::Utc).fixed_offset()
+        } else {
+            let tz_str = ftx.resolve(ftx.args[0].clone())?;
+            let tz_str = match tz_str {
+                Value::String(s) => s,
+                _ => return Err(ftx.error("timezone must be a string")),
+            };
+            parse_timezone(&tz_str, this)
+                .ok_or_else(|| ftx.error(format!("invalid timezone: {}", tz_str)))?
+        };
+        Ok((dt.minute() as i32).into())
     }
 
     pub fn timestamp_seconds(
@@ -482,6 +665,43 @@ pub fn min(Arguments(args): Arguments) -> Result<Value> {
             }
         })
         .cloned()
+}
+
+/// Converts an integer value to an enum type with range validation.
+///
+/// This function validates that the integer value is within the valid range
+/// defined by the enum type's min and max values. If the value is out of range,
+/// it returns an error.
+///
+/// # Arguments
+/// * `ftx` - Function context
+/// * `enum_type` - The enum type definition containing min/max range
+/// * `value` - The integer value to convert
+///
+/// # Returns
+/// * `Ok(Value::Int(value))` if the value is within range
+/// * `Err(ExecutionError)` if the value is out of range
+pub fn convert_int_to_enum(
+    ftx: &FunctionContext,
+    enum_type: Arc<crate::objects::EnumType>,
+    value: i64,
+) -> Result<Value> {
+    // Convert i64 to i32 for range checking
+    let value_i32 = value.try_into().map_err(|_| {
+        ftx.error(format!(
+            "value {} out of range for enum type '{}'",
+            value, enum_type.type_name
+        ))
+    })?;
+
+    if !enum_type.is_valid_value(value_i32) {
+        return Err(ftx.error(format!(
+            "value {} out of range for enum type '{}' (valid range: {}..{})",
+            value, enum_type.type_name, enum_type.min_value, enum_type.max_value
+        )));
+    }
+
+    Ok(Value::Int(value))
 }
 
 #[cfg(test)]
@@ -716,6 +936,22 @@ mod tests {
                 "timestamp getMilliseconds",
                 "timestamp('2023-05-28T00:00:42.123Z').getMilliseconds() == 123",
             ),
+            (
+                "timestamp getDate with timezone",
+                "timestamp('2023-05-28T23:00:00Z').getDate('+01:00') == 29",
+            ),
+            (
+                "timestamp getDayOfMonth with timezone",
+                "timestamp('2023-05-28T23:00:00Z').getDayOfMonth('+01:00') == 28",
+            ),
+            (
+                "timestamp getHours with timezone",
+                "timestamp('2023-05-28T23:00:00Z').getHours('+01:00') == 0",
+            ),
+            (
+                "timestamp getMinutes with timezone",
+                "timestamp('2023-05-28T23:45:00Z').getMinutes('+01:00') == 45",
+            ),
         ]
         .iter()
         .for_each(assert_script);
@@ -879,6 +1115,23 @@ mod tests {
             ("string", "'10'.double() == 10.0"),
             ("int", "10.double() == 10.0"),
             ("double", "10.0.double() == 10.0"),
+            ("nan", "double('NaN').string() == 'NaN'"),
+            ("inf", "double('inf') == double('inf')"),
+            ("-inf", "double('-inf') < 0.0"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_float() {
+        [
+            ("string", "'10'.float() == 10.0"),
+            ("int", "10.float() == 10.0"),
+            ("double", "10.0.float() == 10.0"),
+            ("nan", "float('NaN').string() == 'NaN'"),
+            ("inf", "float('inf') == float('inf')"),
+            ("-inf", "float('-inf') < 0.0"),
         ]
         .iter()
         .for_each(assert_script);
@@ -919,5 +1172,112 @@ mod tests {
         ]
         .iter()
         .for_each(assert_error)
+    }
+
+    #[test]
+    fn test_enum_conversion_valid_range() {
+        use crate::objects::EnumType;
+        use std::sync::Arc;
+
+        // Create an enum type with range 0..2 (e.g., proto enum with values 0, 1, 2)
+        let enum_type = Arc::new(EnumType::new("test.TestEnum".to_string(), 0, 2));
+
+        let mut context = Context::default();
+        context.add_function("toTestEnum", {
+            let enum_type = enum_type.clone();
+            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+                super::convert_int_to_enum(ftx, enum_type.clone(), value)
+            }
+        });
+
+        // Valid conversions within range
+        let program = crate::Program::compile("toTestEnum(0) == 0").unwrap();
+        assert_eq!(program.execute(&context).unwrap(), true.into());
+
+        let program = crate::Program::compile("toTestEnum(1) == 1").unwrap();
+        assert_eq!(program.execute(&context).unwrap(), true.into());
+
+        let program = crate::Program::compile("toTestEnum(2) == 2").unwrap();
+        assert_eq!(program.execute(&context).unwrap(), true.into());
+    }
+
+    #[test]
+    fn test_enum_conversion_too_big() {
+        use crate::objects::EnumType;
+        use std::sync::Arc;
+
+        // Create an enum type with range 0..2
+        let enum_type = Arc::new(EnumType::new("test.TestEnum".to_string(), 0, 2));
+
+        let mut context = Context::default();
+        context.add_function("toTestEnum", {
+            let enum_type = enum_type.clone();
+            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+                super::convert_int_to_enum(ftx, enum_type.clone(), value)
+            }
+        });
+
+        // Invalid conversion - value too large
+        let program = crate::Program::compile("toTestEnum(100)").unwrap();
+        let result = program.execute(&context);
+        assert!(result.is_err(), "Should error on value too large");
+        assert!(result.unwrap_err().to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn test_enum_conversion_too_negative() {
+        use crate::objects::EnumType;
+        use std::sync::Arc;
+
+        // Create an enum type with range 0..2
+        let enum_type = Arc::new(EnumType::new("test.TestEnum".to_string(), 0, 2));
+
+        let mut context = Context::default();
+        context.add_function("toTestEnum", {
+            let enum_type = enum_type.clone();
+            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+                super::convert_int_to_enum(ftx, enum_type.clone(), value)
+            }
+        });
+
+        // Invalid conversion - value too negative
+        let program = crate::Program::compile("toTestEnum(-10)").unwrap();
+        let result = program.execute(&context);
+        assert!(result.is_err(), "Should error on value too negative");
+        assert!(result.unwrap_err().to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn test_enum_conversion_negative_range() {
+        use crate::objects::EnumType;
+        use std::sync::Arc;
+
+        // Create an enum type with negative range -2..2
+        let enum_type = Arc::new(EnumType::new("test.SignedEnum".to_string(), -2, 2));
+
+        let mut context = Context::default();
+        context.add_function("toSignedEnum", {
+            let enum_type = enum_type.clone();
+            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+                super::convert_int_to_enum(ftx, enum_type.clone(), value)
+            }
+        });
+
+        // Valid negative values
+        let program = crate::Program::compile("toSignedEnum(-2) == -2").unwrap();
+        assert_eq!(program.execute(&context).unwrap(), true.into());
+
+        let program = crate::Program::compile("toSignedEnum(-1) == -1").unwrap();
+        assert_eq!(program.execute(&context).unwrap(), true.into());
+
+        // Invalid - too negative
+        let program = crate::Program::compile("toSignedEnum(-3)").unwrap();
+        let result = program.execute(&context);
+        assert!(result.is_err(), "Should error on value too negative");
+
+        // Invalid - too positive
+        let program = crate::Program::compile("toSignedEnum(3)").unwrap();
+        let result = program.execute(&context);
+        assert!(result.is_err(), "Should error on value too large");
     }
 }

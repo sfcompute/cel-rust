@@ -374,6 +374,32 @@ impl<'a> TryFrom<&'a Value> for &'a OptionalValue {
     }
 }
 
+/// Represents an enum type with its valid range of values
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EnumType {
+    /// Fully qualified name of the enum type (e.g., "google.expr.proto3.test.GlobalEnum")
+    pub type_name: Arc<String>,
+    /// Minimum valid integer value for this enum
+    pub min_value: i32,
+    /// Maximum valid integer value for this enum
+    pub max_value: i32,
+}
+
+impl EnumType {
+    pub fn new(type_name: String, min_value: i32, max_value: i32) -> Self {
+        EnumType {
+            type_name: Arc::new(type_name),
+            min_value,
+            max_value,
+        }
+    }
+
+    /// Check if a value is within the valid range for this enum
+    pub fn is_valid_value(&self, value: i32) -> bool {
+        value >= self.min_value && value <= self.max_value
+    }
+}
+
 pub trait TryIntoValue {
     type Error: std::error::Error + 'static + Send + Sync;
     fn try_into_value(self) -> Result<Value, Self::Error>;
@@ -880,9 +906,29 @@ impl Value {
                                 }
                                 (Value::Map(map), Value::String(property)) => {
                                     let key: Key = (&**property).into();
-                                    map.get(&key)
-                                        .cloned()
-                                        .ok_or_else(|| ExecutionError::NoSuchKey(property))
+                                    match map.get(&key).cloned() {
+                                        Some(value) => Ok(value),
+                                        None => {
+                                            // Try extension field lookup if regular key not found
+                                            if let Some(registry) = ctx.get_extension_registry() {
+                                                // Try to get message type from the map
+                                                let message_type = map.map.get(&"@type".into())
+                                                    .and_then(|v| match v {
+                                                        Value::String(s) => Some(s.as_str()),
+                                                        _ => None,
+                                                    })
+                                                    .unwrap_or("");
+
+                                                if let Some(ext_value) = registry.resolve_extension(message_type, &property) {
+                                                    Ok(ext_value)
+                                                } else {
+                                                    Err(ExecutionError::NoSuchKey(property))
+                                                }
+                                            } else {
+                                                Err(ExecutionError::NoSuchKey(property))
+                                            }
+                                        }
+                                    }
                                 }
                                 (Value::Map(map), Value::Bool(property)) => {
                                     let key: Key = property.into();
@@ -1020,17 +1066,51 @@ impl Value {
                 if select.test {
                     match &left {
                         Value::Map(map) => {
+                            // Check regular fields first
                             for key in map.map.deref().keys() {
                                 if key.to_string().eq(&select.field) {
                                     return Ok(Value::Bool(true));
                                 }
                             }
+
+                            // Check extension fields if enabled
+                            if select.is_extension {
+                                if let Some(registry) = ctx.get_extension_registry() {
+                                    if registry.has_extension(&select.field) {
+                                        return Ok(Value::Bool(true));
+                                    }
+                                }
+                            }
+
                             Ok(Value::Bool(false))
                         }
                         _ => Ok(Value::Bool(false)),
                     }
                 } else {
-                    left.member(&select.field)
+                    // Try regular member access first
+                    match left.member(&select.field) {
+                        Ok(value) => Ok(value),
+                        Err(_) => {
+                            // If regular access fails, try extension lookup
+                            if let Some(registry) = ctx.get_extension_registry() {
+                                // For Map values, try to determine the message type
+                                if let Value::Map(ref map) = left {
+                                    // Try to get a type name from the map (if it has one)
+                                    let message_type = map.map.get(&"@type".into())
+                                        .and_then(|v| match v {
+                                            Value::String(s) => Some(s.as_str()),
+                                            _ => None,
+                                        })
+                                        .unwrap_or(""); // Default empty type
+
+                                    if let Some(ext_value) = registry.resolve_extension(message_type, &select.field) {
+                                        return Ok(ext_value);
+                                    }
+                                }
+                            }
+                            Err(ExecutionError::NoSuchKey(select.field.clone().into()))
+                        }
+                    }
                 }
             }
             Expr::List(list_expr) => {
@@ -1095,20 +1175,30 @@ impl Value {
                 match iter {
                     Value::List(items) => {
                         for item in items.deref() {
-                            if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                            // Check loop condition first - short-circuit if false
+                            let cond_result = Value::resolve(&comprehension.loop_cond, &ctx)?;
+                            if !cond_result.to_bool()? {
                                 break;
                             }
+
                             ctx.add_variable_from_value(&comprehension.iter_var, item.clone());
+
+                            // Evaluate loop step - errors will propagate immediately via ?
                             let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
                             ctx.add_variable_from_value(&comprehension.accu_var, accu);
                         }
                     }
                     Value::Map(map) => {
                         for key in map.map.deref().keys() {
-                            if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                            // Check loop condition first - short-circuit if false
+                            let cond_result = Value::resolve(&comprehension.loop_cond, &ctx)?;
+                            if !cond_result.to_bool()? {
                                 break;
                             }
+
                             ctx.add_variable_from_value(&comprehension.iter_var, key.clone());
+
+                            // Evaluate loop step - errors will propagate immediately via ?
                             let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
                             ctx.add_variable_from_value(&comprehension.accu_var, accu);
                         }
@@ -1170,19 +1260,27 @@ impl Value {
 
         // This will always either be because we're trying to access
         // a property on self, or a method on self.
-        let child = match self {
-            Value::Map(ref m) => m.map.get(&name.clone().into()).cloned(),
-            Value::Struct(ref s) => s.fields.get(name.as_str()).cloned(),
-            _ => None,
-        };
-
-        // If the property is both an attribute and a method, then we
-        // give priority to the property. Maybe we can implement lookahead
-        // to see if the next token is a function call?
-        if let Some(child) = child {
-            child.into()
-        } else {
-            ExecutionError::NoSuchKey(name.clone()).into()
+        match self {
+            Value::Map(ref m) => {
+                // For maps, look up the field and return NoSuchKey if not found
+                m.map.get(&name.clone().into())
+                    .cloned()
+                    .ok_or_else(|| ExecutionError::NoSuchKey(name.clone()))
+                    .into()
+            }
+            Value::Struct(ref s) => {
+                // For structs, look up the field by name
+                s.fields
+                    .get(name.as_str())
+                    .cloned()
+                    .ok_or_else(|| ExecutionError::NoSuchKey(name.clone()))
+                    .into()
+            }
+            _ => {
+                // For non-map/non-struct types, accessing a field is always an error
+                // Return NoSuchKey to indicate the field doesn't exist on this type
+                ExecutionError::NoSuchKey(name.clone()).into()
+            }
         }
     }
 
@@ -1719,6 +1817,47 @@ mod tests {
         let result = p.execute(&ctx);
 
         assert!(result.is_err(), "Should error on missing map key");
+    }
+
+    #[test]
+    fn test_extension_field_access() {
+        use crate::extensions::{ExtensionDescriptor, ExtensionRegistry};
+
+        let mut ctx = Context::default();
+
+        // Create a message with extension support
+        let mut msg = HashMap::new();
+        msg.insert("@type".to_string(), Value::String(Arc::new("test.Message".to_string())));
+        msg.insert("regular_field".to_string(), Value::Int(10));
+        ctx.add_variable_from_value("msg", msg);
+
+        // Register an extension
+        if let Some(registry) = ctx.get_extension_registry_mut() {
+            registry.register_extension(ExtensionDescriptor {
+                name: "test.my_extension".to_string(),
+                extendee: "test.Message".to_string(),
+                number: 1000,
+                is_package_scoped: true,
+            });
+
+            registry.set_extension_value(
+                "test.Message",
+                "test.my_extension",
+                Value::String(Arc::new("extension_value".to_string())),
+            );
+        }
+
+        // Test regular field access
+        let prog = Program::compile("msg.regular_field").unwrap();
+        assert_eq!(prog.execute(&ctx), Ok(Value::Int(10)));
+
+        // Test extension field access via indexing
+        let prog = Program::compile("msg['test.my_extension']").unwrap();
+        let result = prog.execute(&ctx);
+        assert_eq!(
+            result,
+            Ok(Value::String(Arc::new("extension_value".to_string())))
+        );
     }
 
     mod opaque {

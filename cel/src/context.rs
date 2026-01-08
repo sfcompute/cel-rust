@@ -1,3 +1,4 @@
+use crate::extensions::ExtensionRegistry;
 use crate::magic::{Function, FunctionRegistry, IntoFunction};
 use crate::objects::{TryIntoValue, Value};
 use crate::parser::Expression;
@@ -35,6 +36,7 @@ pub enum Context<'a> {
         functions: FunctionRegistry,
         variables: BTreeMap<String, Value>,
         resolver: Option<&'a dyn VariableResolver>,
+        extensions: ExtensionRegistry,
     },
     Child {
         parent: &'a Context<'a>,
@@ -120,6 +122,20 @@ impl<'a> Context<'a> {
         }
     }
 
+    pub fn get_extension_registry(&self) -> Option<&ExtensionRegistry> {
+        match self {
+            Context::Root { extensions, .. } => Some(extensions),
+            Context::Child { parent, .. } => parent.get_extension_registry(),
+        }
+    }
+
+    pub fn get_extension_registry_mut(&mut self) -> Option<&mut ExtensionRegistry> {
+        match self {
+            Context::Root { extensions, .. } => Some(extensions),
+            Context::Child { .. } => None,
+        }
+    }
+
     pub(crate) fn get_function(&self, name: &str) -> Option<&Function> {
         match self {
             Context::Root { functions, .. } => functions.get(name),
@@ -168,6 +184,7 @@ impl<'a> Context<'a> {
             variables: Default::default(),
             functions: Default::default(),
             resolver: None,
+            extensions: ExtensionRegistry::new(),
         }
     }
 }
@@ -178,6 +195,7 @@ impl Default for Context<'_> {
             variables: Default::default(),
             functions: Default::default(),
             resolver: None,
+            extensions: ExtensionRegistry::new(),
         };
 
         ctx.add_function("contains", functions::contains);
@@ -189,6 +207,7 @@ impl Default for Context<'_> {
         ctx.add_function("string", functions::string);
         ctx.add_function("bytes", functions::bytes);
         ctx.add_function("double", functions::double);
+        ctx.add_function("float", functions::float);
         ctx.add_function("int", functions::int);
         ctx.add_function("uint", functions::uint);
         ctx.add_function("optional.none", functions::optional_none);
