@@ -218,41 +218,6 @@ impl<K: Into<Key>, V: Into<Value>> From<HashMap<K, V>> for Map {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Struct {
-    pub type_name: Arc<String>,
-    pub fields: Arc<HashMap<String, Value>>,
-}
-
-impl PartialEq for Struct {
-    fn eq(&self, other: &Self) -> bool {
-        // Structs are equal if they have the same type name and all fields are equal
-        if self.type_name != other.type_name {
-            return false;
-        }
-        if self.fields.len() != other.fields.len() {
-            return false;
-        }
-        for (key, value) in self.fields.iter() {
-            match other.fields.get(key) {
-                Some(other_value) => {
-                    if value != other_value {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
-        true
-    }
-}
-
-impl PartialOrd for Struct {
-    fn partial_cmp(&self, _: &Self) -> Option<Ordering> {
-        None
-    }
-}
-
 /// Equality helper for [`Opaque`] values.
 ///
 /// Implementors define how two values of the same runtime type compare for
@@ -613,7 +578,6 @@ impl PartialEq for Value {
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Struct(a), Value::Struct(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
-            (Value::Struct(a), Value::Struct(b)) => a == b,
             (Value::Function(a1, a2), Value::Function(b1, b2)) => a1 == b1 && a2 == b2,
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::UInt(a), Value::UInt(b)) => a == b,
