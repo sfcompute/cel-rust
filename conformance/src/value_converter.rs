@@ -53,8 +53,8 @@ pub fn proto_value_to_cel_value(proto_value: &ProtoValue) -> Result<CelValue, Co
             }))
         }
         Some(crate::proto::cel::expr::value::Kind::EnumValue(enum_val)) => {
-            // Enum values are represented as integers in CEL
-            Ok(Int(enum_val.value as i64))
+            // Enum values include their type name for type() introspection
+            Ok(Enum(enum_val.value as i64, Arc::new(enum_val.r#type.clone())))
         }
         Some(crate::proto::cel::expr::value::Kind::ObjectValue(any)) => {
             convert_any_to_cel_value(any)
@@ -659,7 +659,7 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
     fields.insert("single_double".to_string(), Float(msg.single_double));
 
     // Handle standalone_enum field (proto3 enums are not optional)
-    fields.insert("standalone_enum".to_string(), Int(msg.standalone_enum as i64));
+    fields.insert("standalone_enum".to_string(), Enum(msg.standalone_enum as i64, Arc::new("cel.expr.conformance.proto3.TestAllTypes.NestedEnum".to_string())));
 
     // Handle reserved keyword fields (fields 500-516)
     // These will be filtered out later, but we need to include them first
@@ -856,7 +856,7 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
         fields.insert("repeated_sfixed64".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_nested_enum.is_empty() {
-        let values: Vec<CelValue> = msg.repeated_nested_enum.iter().map(|&v| Int(v as i64)).collect();
+        let values: Vec<CelValue> = msg.repeated_nested_enum.iter().map(|&v| Enum(v as i64, Arc::new("cel.expr.conformance.proto3.TestAllTypes.NestedEnum".to_string()))).collect();
         fields.insert("repeated_nested_enum".to_string(), List(Arc::new(values)));
     }
 
@@ -1066,7 +1066,7 @@ fn convert_test_all_types_proto2_to_struct(
 
     // Handle standalone_enum field
     if let Some(e) = msg.standalone_enum {
-        fields.insert("standalone_enum".to_string(), Int(e as i64));
+        fields.insert("standalone_enum".to_string(), Enum(e as i64, Arc::new("cel.expr.conformance.proto2.TestAllTypes.NestedEnum".to_string())));
     }
 
     // Handle oneof field (kind) - proto2 version
@@ -1182,7 +1182,7 @@ fn convert_test_all_types_proto2_to_struct(
 
     // Handle repeated enum fields
     if !msg.repeated_nested_enum.is_empty() {
-        let values: Vec<CelValue> = msg.repeated_nested_enum.iter().map(|&v| Int(v as i64)).collect();
+        let values: Vec<CelValue> = msg.repeated_nested_enum.iter().map(|&v| Enum(v as i64, Arc::new("cel.expr.conformance.proto2.TestAllTypes.NestedEnum".to_string()))).collect();
         fields.insert("repeated_nested_enum".to_string(), List(Arc::new(values)));
     }
 

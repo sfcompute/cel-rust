@@ -295,15 +295,18 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             if !v.is_finite() {
                 return Err(ftx.error("range"));
             }
+            // CEL considers exactly -2^63 to be out of range for int conversion
             // 2^63-1 as f64 rounds to 2^63, so check >= 2^63
-            // -2^63 is exactly representable, so check <= -2^63 - 1
-            if v >= 9223372036854775808.0 || v < -9223372036854775808.0 {
+            // -2^63 is exactly representable but CEL excludes it from valid int range
+            if v >= 9223372036854775808.0 || v <= -9223372036854775808.0 {
                 return Err(ftx.error("range"));
             }
             Value::Int(v as i64)
         }
         Value::Int(v) => Value::Int(v),
         Value::UInt(v) => Value::Int(v.try_into().map_err(|_| ftx.error("integer overflow"))?),
+        // Enum values convert to their integer value
+        Value::Enum(v, _) => Value::Int(v),
         #[cfg(feature = "chrono")]
         Value::Timestamp(t) => Value::Int(t.timestamp()),
         v => return Err(ftx.error(format!("cannot convert {v:?} to int"))),
@@ -351,6 +354,8 @@ pub fn type_(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             // Clone the type name to avoid lifetime issues
             return Ok(Value::String(s.type_name.clone()));
         }
+        // Enum values have type "int" in CEL
+        Value::Enum(_, _) => "int",
         Value::Namespace(_) => "string",
         #[cfg(feature = "chrono")]
         Value::Timestamp(_) => "google.protobuf.Timestamp",
@@ -463,6 +468,8 @@ pub fn type_of(This(this): This<Value>) -> Result<Value> {
         #[cfg(feature = "chrono")]
         Value::Duration(_) => "google.protobuf.Duration",
         Value::Struct(_) => "map", // Structs are treated as maps in CEL
+        // Enum values have type "int" in CEL
+        Value::Enum(_, _) => "int",
         Value::Function(_, _) => "function",
         Value::Opaque(o) => {
             if o.runtime_type_name() == "optional_type" {
@@ -1525,6 +1532,111 @@ pub mod time {
     ) -> Result<Value> {
         Ok((this.timestamp_subsec_millis() as i32).into())
     }
+
+    /// Parse a fixed offset timezone string and return a FixedOffset.
+    fn parse_fixed_offset(tz_str: &str) -> Result<chrono::FixedOffset> {
+        use chrono::FixedOffset;
+        let tz_trimmed = tz_str.trim();
+        let (sign, offset_str) = if tz_trimmed.starts_with('+') {
+            (1, &tz_trimmed[1..])
+        } else if tz_trimmed.starts_with('-') {
+            (-1, &tz_trimmed[1..])
+        } else {
+            (1, tz_trimmed)
+        };
+        let parts: Vec<&str> = offset_str.split(':').collect();
+        if parts.len() == 2 {
+            if let (Ok(hours), Ok(minutes)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
+                let total_seconds = sign * (hours * 3600 + minutes * 60);
+                return FixedOffset::east_opt(total_seconds)
+                    .ok_or_else(|| ExecutionError::function_error("timezone", "invalid offset"));
+            }
+        }
+        Err(ExecutionError::function_error("timezone", format!("invalid offset format: {}", tz_str)))
+    }
+
+    /// Apply timezone to a timestamp and return the datetime in that timezone
+    fn apply_timezone(timestamp: chrono::DateTime<chrono::FixedOffset>, tz_str: &str) -> Result<chrono::DateTime<chrono::FixedOffset>> {
+        use chrono::Offset;
+        let tz_trimmed = tz_str.trim();
+        if tz_trimmed.starts_with('+') || tz_trimmed.starts_with('-') || tz_trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            let offset = parse_fixed_offset(tz_str)?;
+            return Ok(timestamp.with_timezone(&offset));
+        }
+        let tz: chrono_tz::Tz = tz_str.parse().map_err(|_| ExecutionError::function_error("timezone", format!("unknown timezone: {}", tz_str)))?;
+        let dt_in_tz = timestamp.with_timezone(&tz);
+        let fixed_offset = dt_in_tz.offset().fix();
+        Ok(timestamp.with_timezone(&fixed_offset))
+    }
+
+    /// Helper to extract timestamp from Value
+    fn extract_timestamp(value: Value) -> Result<chrono::DateTime<chrono::FixedOffset>> {
+        match value {
+            Value::Timestamp(ts) => Ok(ts),
+            _ => Err(ExecutionError::UnsupportedTargetType { target: value }),
+        }
+    }
+
+    pub fn timestamp_year_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
+        let ts = extract_timestamp(this)?;
+        let dt = apply_timezone(ts, tz.as_str())?;
+        Ok(dt.year().into())
+    }
+
+    pub fn timestamp_month_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
+        let ts = extract_timestamp(this)?;
+        let dt = apply_timezone(ts, tz.as_str())?;
+        Ok((dt.month0() as i32).into())
+    }
+
+    pub fn timestamp_year_day_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
+        let ts = extract_timestamp(this)?;
+        let dt = apply_timezone(ts, tz.as_str())?;
+        let year = dt.checked_sub_days(Days::new(dt.day0() as u64)).unwrap().checked_sub_months(Months::new(dt.month0())).unwrap();
+        Ok(dt.signed_duration_since(year).num_days().into())
+    }
+
+    pub fn timestamp_month_day_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
+        let ts = extract_timestamp(this)?;
+        let dt = apply_timezone(ts, tz.as_str())?;
+        Ok((dt.day0() as i32).into())
+    }
+
+    pub fn timestamp_date_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
+        let ts = extract_timestamp(this)?;
+        let dt = apply_timezone(ts, tz.as_str())?;
+        Ok((dt.day() as i32).into())
+    }
+
+    pub fn timestamp_weekday_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
+        let ts = extract_timestamp(this)?;
+        let dt = apply_timezone(ts, tz.as_str())?;
+        Ok((dt.weekday().num_days_from_sunday() as i32).into())
+    }
+
+    pub fn get_hours_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
+        let ts = extract_timestamp(this)?;
+        let dt = apply_timezone(ts, tz.as_str())?;
+        Ok((dt.hour() as i32).into())
+    }
+
+    pub fn get_minutes_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
+        let ts = extract_timestamp(this)?;
+        let dt = apply_timezone(ts, tz.as_str())?;
+        Ok((dt.minute() as i32).into())
+    }
+
+    pub fn get_seconds_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
+        let ts = extract_timestamp(this)?;
+        let dt = apply_timezone(ts, tz.as_str())?;
+        Ok((dt.second() as i32).into())
+    }
+
+    pub fn get_milliseconds_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
+        let ts = extract_timestamp(this)?;
+        let dt = apply_timezone(ts, tz.as_str())?;
+        Ok((dt.timestamp_subsec_millis() as i32).into())
+    }
 }
 
 /// Proto extension functions for hasExt and getExt
@@ -2434,6 +2546,7 @@ fn format_value_as_string(value: &Value) -> String {
         }
         // Dyn values are wrapped in Opaque, handle them there
         Value::Function(_, _) => "<function>".to_string(),
+        Value::Enum(v, type_name) => format!("{}({})", type_name, v),
         Value::Opaque(_) => {
             // Try to convert DynValue first
             if let Ok(dyn_val) = <&DynValue>::try_from(value) {
@@ -2728,6 +2841,21 @@ mod tests {
         ]
         .iter()
         .for_each(assert_error)
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn test_timestamp_with_timezone() {
+        // Tests for timezone-aware timestamp functions
+        [
+            ("getDate with timezone", "timestamp('2009-02-13T23:31:30Z').getDate('Australia/Sydney') == 14"),
+            ("getDayOfMonth with positive offset", "timestamp('2009-02-13T23:31:30Z').getDayOfMonth('+11:00') == 13"),
+            ("getDayOfMonth with negative offset", "timestamp('2009-02-13T02:00:00Z').getDayOfMonth('-02:30') == 11"),
+            ("getHours with offset", "timestamp('2009-02-13T23:31:30Z').getHours('02:00') == 1"),
+            ("getMinutes with timezone", "timestamp('2009-02-13T23:31:30Z').getMinutes('Asia/Kathmandu') == 16"),
+        ]
+        .iter()
+        .for_each(assert_script);
     }
 
     #[cfg(feature = "chrono")]

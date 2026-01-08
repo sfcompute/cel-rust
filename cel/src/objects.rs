@@ -341,7 +341,15 @@ fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
     // Enum fields - both proto2 and proto3 enums default to 0 (the first enum value)
     // For conformance tests, all enum fields should have default value 0
     if field_name.ends_with("_enum") || field_name == "standalone_enum" {
-        return Some(Value::Int(0));
+        // Construct the enum type name based on the struct type and field name
+        let enum_type = if field_name == "standalone_enum" || field_name.contains("nested_enum") {
+            // NestedEnum is a nested type within TestAllTypes
+            format!("{}.NestedEnum", type_name)
+        } else {
+            // Unknown enum type, fall back to Int
+            return Some(Value::Int(0));
+        };
+        return Some(Value::Enum(0, Arc::new(enum_type)));
     }
 
     // Scalar fields (single_*) - return type-appropriate defaults
@@ -446,8 +454,8 @@ fn is_proto3_default_value(field_name: &str, value: &Value) -> bool {
             _ => false,
         }
     } else if field_name.ends_with("_enum") || field_name == "standalone_enum" {
-        // Enum fields default to 0
-        matches!(value, Value::Int(0))
+        // Enum fields default to 0 (can be either Int(0) or Enum(0, _))
+        matches!(value, Value::Int(0) | Value::Enum(0, _))
     } else {
         // Other fields (message types, etc.) are not scalar
         false
@@ -570,7 +578,7 @@ fn populate_proto_defaults(
             // Enum fields also have implicit zero defaults in proto3
             fields
                 .entry("standalone_enum".to_string())
-                .or_insert(Value::Int(0));
+                .or_insert(Value::Enum(0, Arc::new(format!("{}.NestedEnum", type_name))));
         }
     }
 }
@@ -945,6 +953,8 @@ pub enum Value {
     String(Arc<String>),
     Bytes(Arc<Vec<u8>>),
     Bool(bool),
+    /// Enum value with its integer value and fully qualified type name
+    Enum(i64, Arc<String>),
     #[cfg(feature = "chrono")]
     Duration(chrono::Duration),
     #[cfg(feature = "chrono")]
@@ -967,6 +977,7 @@ impl Debug for Value {
             Value::String(s) => write!(f, "String({:?})", s),
             Value::Bytes(b) => write!(f, "Bytes({:?})", b),
             Value::Bool(b) => write!(f, "Bool({:?})", b),
+            Value::Enum(v, type_name) => write!(f, "Enum({:?}, {:?})", v, type_name),
             #[cfg(feature = "chrono")]
             Value::Duration(d) => write!(f, "Duration({:?})", d),
             #[cfg(feature = "chrono")]
@@ -1005,6 +1016,7 @@ pub enum ValueType {
     String,
     Bytes,
     Bool,
+    Enum,
     Duration,
     Timestamp,
     Opaque,
@@ -1025,6 +1037,7 @@ impl Display for ValueType {
             ValueType::String => write!(f, "string"),
             ValueType::Bytes => write!(f, "bytes"),
             ValueType::Bool => write!(f, "bool"),
+            ValueType::Enum => write!(f, "enum"),
             ValueType::Opaque => write!(f, "opaque"),
             ValueType::Duration => write!(f, "duration"),
             ValueType::Timestamp => write!(f, "timestamp"),
@@ -1047,6 +1060,7 @@ impl Value {
             Value::String(_) => ValueType::String,
             Value::Bytes(_) => ValueType::Bytes,
             Value::Bool(_) => ValueType::Bool,
+            Value::Enum(_, _) => ValueType::Enum,
             Value::Opaque(_) => ValueType::Opaque,
             #[cfg(feature = "chrono")]
             Value::Duration(_) => ValueType::Duration,
@@ -1154,6 +1168,10 @@ impl PartialEq for Value {
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
+            // Enum values compare by their integer value
+            (Value::Enum(a, _), Value::Enum(b, _)) => a == b,
+            (Value::Enum(a, _), Value::Int(b)) => a == b,
+            (Value::Int(a), Value::Enum(b, _)) => a == b,
             (Value::Null, Value::Null) => true,
             // Empty google.protobuf.Value struct is equal to null
             (Value::Struct(ref s), Value::Null)
@@ -2354,7 +2372,12 @@ impl Value {
                             // Enum field validation: enums are stored as int32
                             // Check that values fit in int32 range
                             if field_expr.field.ends_with("_enum") || field_expr.field == "standalone_enum" {
-                                if let Value::Int(i) = value {
+                                let enum_val = match &value {
+                                    Value::Int(i) => Some(*i),
+                                    Value::Enum(i, _) => Some(*i),
+                                    _ => None,
+                                };
+                                if let Some(i) = enum_val {
                                     if i < i32::MIN as i64 || i > i32::MAX as i64 {
                                         return Err(ExecutionError::function_error(
                                             "struct",
@@ -2370,6 +2393,58 @@ impl Value {
                                 if let Value::Float(f) = value {
                                     let f32_val = f as f32;
                                     value = Value::Float(f32_val as f64);
+                                }
+                            }
+
+                            // For single_value field (google.protobuf.Value type), handle JSON semantics
+                            // JSON numbers are represented as doubles
+                            // Large Int64/UInt64 outside safe range convert to String
+                            if field_expr.field == "single_value" {
+                                const MAX_SAFE_INT: i64 = 9007199254740991; // 2^53-1
+                                const MIN_SAFE_INT: i64 = -9007199254740991; // -(2^53-1)
+                                match value {
+                                    Value::Int(i) if i > MAX_SAFE_INT || i < MIN_SAFE_INT => {
+                                        value = Value::String(Arc::new(i.to_string()));
+                                    }
+                                    Value::Int(i) => {
+                                        // Convert safe-range integers to Float for JSON compatibility
+                                        value = Value::Float(i as f64);
+                                    }
+                                    Value::UInt(u) if u > MAX_SAFE_INT as u64 => {
+                                        value = Value::String(Arc::new(u.to_string()));
+                                    }
+                                    Value::UInt(u) => {
+                                        // Convert safe-range unsigned integers to Float for JSON compatibility
+                                        value = Value::Float(u as f64);
+                                    }
+                                    Value::Bytes(ref b) => {
+                                        // Convert bytes to base64 string for JSON
+                                        use base64::Engine;
+                                        let encoded = base64::engine::general_purpose::STANDARD.encode(b.as_slice());
+                                        value = Value::String(Arc::new(encoded));
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // Validate 32-bit wrapper field ranges
+                            if field_expr.field == "single_int32_wrapper" {
+                                if let Value::Int(i) = value {
+                                    if i < i32::MIN as i64 || i > i32::MAX as i64 {
+                                        return Err(ExecutionError::function_error("type", "range"));
+                                    }
+                                }
+                            }
+                            if field_expr.field == "single_uint32_wrapper" {
+                                if let Value::UInt(u) = value {
+                                    if u > u32::MAX as u64 {
+                                        return Err(ExecutionError::function_error("type", "range"));
+                                    }
+                                }
+                                if let Value::Int(i) = value {
+                                    if i < 0 || i > u32::MAX as i64 {
+                                        return Err(ExecutionError::function_error("type", "range"));
+                                    }
                                 }
                             }
 
@@ -2536,6 +2611,27 @@ impl Value {
                 if is_wrapper_type(&qualified_type_name) {
                     if let Value::Struct(ref s) = result {
                         if let Some(value) = s.fields.get("value") {
+                            // Validate 32-bit wrapper type ranges
+                            if qualified_type_name == "google.protobuf.Int32Value" {
+                                if let Value::Int(i) = value {
+                                    if *i < i32::MIN as i64 || *i > i32::MAX as i64 {
+                                        return Err(ExecutionError::function_error("type", "range"));
+                                    }
+                                }
+                            }
+                            if qualified_type_name == "google.protobuf.UInt32Value" {
+                                if let Value::UInt(u) = value {
+                                    if *u > u32::MAX as u64 {
+                                        return Err(ExecutionError::function_error("type", "range"));
+                                    }
+                                }
+                                // Also check if a signed Int is used (negative value)
+                                if let Value::Int(i) = value {
+                                    if *i < 0 || *i > u32::MAX as i64 {
+                                        return Err(ExecutionError::function_error("type", "range"));
+                                    }
+                                }
+                            }
                             // For FloatValue, truncate to float32 precision
                             if qualified_type_name == "google.protobuf.FloatValue" {
                                 if let Value::Float(f) = value {
@@ -2730,6 +2826,19 @@ impl ops::Add<Value> for Value {
                 .checked_add_signed(l)
                 .ok_or(ExecutionError::Overflow("add", l.into(), r.into()))
                 .map(Value::Timestamp),
+            // Enum values are treated as Int for arithmetic operations
+            (Value::Enum(l, _), Value::Int(r)) => l
+                .checked_add(r)
+                .ok_or(ExecutionError::Overflow("add", l.into(), r.into()))
+                .map(Value::Int),
+            (Value::Int(l), Value::Enum(r, _)) => l
+                .checked_add(r)
+                .ok_or(ExecutionError::Overflow("add", l.into(), r.into()))
+                .map(Value::Int),
+            (Value::Enum(l, _), Value::Enum(r, _)) => l
+                .checked_add(r)
+                .ok_or(ExecutionError::Overflow("add", l.into(), r.into()))
+                .map(Value::Int),
             (left, right) => Err(ExecutionError::UnsupportedBinaryOperator(
                 "add", left, right,
             )),

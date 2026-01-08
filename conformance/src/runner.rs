@@ -290,13 +290,20 @@ impl ConformanceRunner {
                     let create_enum_constructor = move |_ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
                         match &value {
                             cel::objects::Value::String(name) => {
-                                // Convert enum name to integer value
+                                // Convert enum name to integer value with type info
                                 let enum_value = get_enum_value_by_name(&type_name_clone, name.as_str())
                                     .ok_or_else(|| cel::ExecutionError::function_error("enum", "invalid"))?;
-                                Ok(cel::objects::Value::Int(enum_value))
+                                Ok(cel::objects::Value::Enum(enum_value, Arc::new(type_name_clone.clone())))
+                            }
+                            cel::objects::Value::Int(i) => {
+                                // Validate int32 range for enum values
+                                if *i < i32::MIN as i64 || *i > i32::MAX as i64 {
+                                    return Err(cel::ExecutionError::function_error("enum", "range"));
+                                }
+                                Ok(cel::objects::Value::Enum(*i, Arc::new(type_name_clone.clone())))
                             }
                             _ => {
-                                // For non-string values (like integers), return as-is
+                                // For other values, return as-is
                                 Ok(value)
                             }
                         }
@@ -316,7 +323,14 @@ impl ConformanceRunner {
                                 cel::objects::Value::String(name) => {
                                     let enum_value = get_enum_value_by_name(&type_name_clone2, name.as_str())
                                         .ok_or_else(|| cel::ExecutionError::function_error("enum", "invalid"))?;
-                                    Ok(cel::objects::Value::Int(enum_value))
+                                    Ok(cel::objects::Value::Enum(enum_value, Arc::new(type_name_clone2.clone())))
+                                }
+                                cel::objects::Value::Int(i) => {
+                                    // Validate int32 range for enum values
+                                    if *i < i32::MIN as i64 || *i > i32::MAX as i64 {
+                                        return Err(cel::ExecutionError::function_error("enum", "range"));
+                                    }
+                                    Ok(cel::objects::Value::Enum(*i, Arc::new(type_name_clone2.clone())))
                                 }
                                 _ => Ok(value)
                             }
@@ -324,18 +338,19 @@ impl ConformanceRunner {
                         context.add_function("TestAllTypes.NestedEnum", create_enum_constructor2);
 
                         // Also register TestAllTypes as a map with NestedEnum field
+                        let nested_enum_type_name = type_name.clone();
                         let mut nested_enum_map = std::collections::HashMap::new();
                         nested_enum_map.insert(
                             cel::objects::Key::String(Arc::new("FOO".to_string())),
-                            cel::objects::Value::Int(0),
+                            cel::objects::Value::Enum(0, Arc::new(nested_enum_type_name.clone())),
                         );
                         nested_enum_map.insert(
                             cel::objects::Key::String(Arc::new("BAR".to_string())),
-                            cel::objects::Value::Int(1),
+                            cel::objects::Value::Enum(1, Arc::new(nested_enum_type_name.clone())),
                         );
                         nested_enum_map.insert(
                             cel::objects::Key::String(Arc::new("BAZ".to_string())),
-                            cel::objects::Value::Int(2),
+                            cel::objects::Value::Enum(2, Arc::new(nested_enum_type_name.clone())),
                         );
 
                         let mut test_all_types_fields = std::collections::HashMap::new();
@@ -353,18 +368,19 @@ impl ConformanceRunner {
 
                     // For GlobalEnum - register as a map with enum values
                     if type_name.contains("GlobalEnum") && !type_name.contains("TestAllTypes") {
+                        let global_enum_type_name = type_name.clone();
                         let mut global_enum_map = std::collections::HashMap::new();
                         global_enum_map.insert(
                             cel::objects::Key::String(Arc::new("GOO".to_string())),
-                            cel::objects::Value::Int(0),
+                            cel::objects::Value::Enum(0, Arc::new(global_enum_type_name.clone())),
                         );
                         global_enum_map.insert(
                             cel::objects::Key::String(Arc::new("GAR".to_string())),
-                            cel::objects::Value::Int(1),
+                            cel::objects::Value::Enum(1, Arc::new(global_enum_type_name.clone())),
                         );
                         global_enum_map.insert(
                             cel::objects::Key::String(Arc::new("GAZ".to_string())),
-                            cel::objects::Value::Int(2),
+                            cel::objects::Value::Enum(2, Arc::new(global_enum_type_name.clone())),
                         );
 
                         context.add_variable("GlobalEnum", cel::objects::Value::Map(cel::objects::Map {
@@ -525,6 +541,10 @@ fn values_equal(a: &CelValue, b: &CelValue) -> bool {
         }
         (String(a), String(b)) => a == b,
         (Bytes(a), Bytes(b)) => a == b,
+        // Enum values compare by their integer value (type name is for type() introspection)
+        (Enum(a, _), Enum(b, _)) => a == b,
+        (Enum(a, _), Int(b)) => a == b,
+        (Int(a), Enum(b, _)) => a == b,
         (List(a), List(b)) => {
             if a.len() != b.len() {
                 return false;
