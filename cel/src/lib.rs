@@ -8,6 +8,7 @@ mod macros;
 
 pub mod common;
 pub mod context;
+pub mod extensions;
 pub mod parser;
 
 pub use common::ast::IdedExpr;
