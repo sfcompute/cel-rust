@@ -36,4 +36,5 @@ default = ["regex", "chrono"]
 json = ["dep:serde_json", "dep:base64"]
 regex = ["dep:regex"]
 chrono = ["dep:chrono"]
+proto = []  # Proto feature for conformance tests
 dhat-heap = [ ] # if you are doing heap profiling
