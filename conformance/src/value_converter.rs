@@ -315,13 +315,15 @@ pub fn convert_any_to_cel_value(any: &Any) -> Result<CelValue, ConversionError> 
 
         // Convert to CEL Timestamp
         use chrono::{DateTime, TimeZone, Utc};
-        let timestamp = Utc.timestamp_opt(seconds, nanos as u32)
+        let timestamp = Utc
+            .timestamp_opt(seconds, nanos as u32)
             .single()
-            .ok_or_else(|| ConversionError::Unsupported(
-                "Invalid timestamp values".to_string()
-            ))?;
+            .ok_or_else(|| ConversionError::Unsupported("Invalid timestamp values".to_string()))?;
         // Convert to FixedOffset (UTC = +00:00)
-        let fixed_offset = DateTime::from_naive_utc_and_offset(timestamp.naive_utc(), chrono::FixedOffset::east_opt(0).unwrap());
+        let fixed_offset = DateTime::from_naive_utc_and_offset(
+            timestamp.naive_utc(),
+            chrono::FixedOffset::east_opt(0).unwrap(),
+        );
         return Ok(Timestamp(fixed_offset));
     }
 
@@ -406,7 +408,7 @@ fn extract_extension_fields(
     encoded_msg: &[u8],
     fields: &mut HashMap<String, CelValue>,
 ) -> Result<(), ConversionError> {
-    use cel::proto_compare::{parse_proto_wire_format, field_value_to_cel};
+    use cel::proto_compare::{field_value_to_cel, parse_proto_wire_format};
 
     // Parse wire format to get all fields
     let field_map = match parse_proto_wire_format(encoded_msg) {
@@ -433,9 +435,8 @@ fn extract_extension_fields(
 
             // For repeated extensions (1004, 1008), create a List
             if field_num == 1004 || field_num == 1008 {
-                let list_values: Vec<CelValue> = values.iter()
-                    .map(|v| field_value_to_cel(v))
-                    .collect();
+                let list_values: Vec<CelValue> =
+                    values.iter().map(|v| field_value_to_cel(v)).collect();
                 fields.insert(ext_name.to_string(), CelValue::List(Arc::new(list_values)));
             } else {
                 // For singular extensions, use the first (and only) value
@@ -485,7 +486,9 @@ fn convert_protobuf_value_to_cel(value: &prost_types::Value) -> Result<CelValue,
 
 /// Parse oneof field from wire format if it's present but not decoded by prost
 /// Returns (field_name, cel_value) if found
-fn parse_oneof_from_wire_format(wire_bytes: &[u8]) -> Result<Option<(String, CelValue)>, ConversionError> {
+fn parse_oneof_from_wire_format(
+    wire_bytes: &[u8],
+) -> Result<Option<(String, CelValue)>, ConversionError> {
     use cel::proto_compare::parse_proto_wire_format;
     use prost::Message;
 
@@ -501,7 +504,11 @@ fn parse_oneof_from_wire_format(wire_bytes: &[u8]) -> Result<Option<(String, Cel
             // Field 400 is a length-delimited message (NestedTestAllTypes)
             if let cel::proto_compare::FieldValue::LengthDelimited(bytes) = first_value {
                 // Decode as NestedTestAllTypes
-                if let Ok(nested) = crate::proto::cel::expr::conformance::proto3::NestedTestAllTypes::decode(&bytes[..]) {
+                if let Ok(nested) =
+                    crate::proto::cel::expr::conformance::proto3::NestedTestAllTypes::decode(
+                        &bytes[..],
+                    )
+                {
                     // Convert NestedTestAllTypes to struct
                     let mut nested_fields = HashMap::new();
 
@@ -513,7 +520,9 @@ fn parse_oneof_from_wire_format(wire_bytes: &[u8]) -> Result<Option<(String, Cel
                             child_fields.insert("payload".to_string(), payload_struct);
                         }
                         let child_struct = CelValue::Struct(cel::objects::Struct {
-                            type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
+                            type_name: Arc::new(
+                                "cel.expr.conformance.proto3.NestedTestAllTypes".to_string(),
+                            ),
                             fields: Arc::new(child_fields),
                         });
                         nested_fields.insert("child".to_string(), child_struct);
@@ -526,7 +535,9 @@ fn parse_oneof_from_wire_format(wire_bytes: &[u8]) -> Result<Option<(String, Cel
                     }
 
                     let nested_struct = CelValue::Struct(cel::objects::Struct {
-                        type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
+                        type_name: Arc::new(
+                            "cel.expr.conformance.proto3.NestedTestAllTypes".to_string(),
+                        ),
                         fields: Arc::new(nested_fields),
                     });
                     return Ok(Some(("oneof_type".to_string(), nested_struct)));
@@ -570,7 +581,8 @@ fn convert_test_all_types_proto3_to_struct(
 ) -> Result<CelValue, ConversionError> {
     use prost::Message;
     let mut bytes = Vec::new();
-    msg.encode(&mut bytes).map_err(|e| ConversionError::Unsupported(format!("Failed to encode: {}", e)))?;
+    msg.encode(&mut bytes)
+        .map_err(|e| ConversionError::Unsupported(format!("Failed to encode: {}", e)))?;
     convert_test_all_types_proto3_to_struct_with_bytes(msg, &bytes)
 }
 
@@ -651,15 +663,24 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
     fields.insert("single_uint64".to_string(), UInt(msg.single_uint64));
     fields.insert("single_sint32".to_string(), Int(msg.single_sint32 as i64));
     fields.insert("single_sint64".to_string(), Int(msg.single_sint64));
-    fields.insert("single_fixed32".to_string(), UInt(msg.single_fixed32 as u64));
+    fields.insert(
+        "single_fixed32".to_string(),
+        UInt(msg.single_fixed32 as u64),
+    );
     fields.insert("single_fixed64".to_string(), UInt(msg.single_fixed64));
-    fields.insert("single_sfixed32".to_string(), Int(msg.single_sfixed32 as i64));
+    fields.insert(
+        "single_sfixed32".to_string(),
+        Int(msg.single_sfixed32 as i64),
+    );
     fields.insert("single_sfixed64".to_string(), Int(msg.single_sfixed64));
     fields.insert("single_float".to_string(), Float(msg.single_float as f64));
     fields.insert("single_double".to_string(), Float(msg.single_double));
 
     // Handle standalone_enum field (proto3 enums are not optional)
-    fields.insert("standalone_enum".to_string(), Int(msg.standalone_enum as i64));
+    fields.insert(
+        "standalone_enum".to_string(),
+        Int(msg.standalone_enum as i64),
+    );
 
     // Handle reserved keyword fields (fields 500-516)
     // These will be filtered out later, but we need to include them first
@@ -699,7 +720,9 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
                         child_fields.insert("payload".to_string(), payload_struct);
                     }
                     let child_struct = Struct(Struct {
-                        type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
+                        type_name: Arc::new(
+                            "cel.expr.conformance.proto3.NestedTestAllTypes".to_string(),
+                        ),
                         fields: Arc::new(child_fields),
                     });
                     nested_fields.insert("child".to_string(), child_struct);
@@ -712,7 +735,9 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
                 }
 
                 let nested_struct = Struct(Struct {
-                    type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
+                    type_name: Arc::new(
+                        "cel.expr.conformance.proto3.NestedTestAllTypes".to_string(),
+                    ),
                     fields: Arc::new(nested_fields),
                 });
                 fields.insert("oneof_type".to_string(), nested_struct);
@@ -753,10 +778,14 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
     if let Some(ref timestamp) = msg.single_timestamp {
         // Convert google.protobuf.Timestamp to CEL Timestamp
         use chrono::{DateTime, TimeZone, Utc};
-        let ts = Utc.timestamp_opt(timestamp.seconds, timestamp.nanos as u32)
+        let ts = Utc
+            .timestamp_opt(timestamp.seconds, timestamp.nanos as u32)
             .single()
             .ok_or_else(|| ConversionError::Unsupported("Invalid timestamp".to_string()))?;
-        let fixed_offset = DateTime::from_naive_utc_and_offset(ts.naive_utc(), chrono::FixedOffset::east_opt(0).unwrap());
+        let fixed_offset = DateTime::from_naive_utc_and_offset(
+            ts.naive_utc(),
+            chrono::FixedOffset::east_opt(0).unwrap(),
+        );
         fields.insert("single_timestamp".to_string(), Timestamp(fixed_offset));
     }
 
@@ -775,7 +804,8 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
     if let Some(ref duration) = msg.single_duration {
         // Convert google.protobuf.Duration to CEL Duration
         use chrono::Duration as ChronoDuration;
-        let dur = ChronoDuration::seconds(duration.seconds) + ChronoDuration::nanoseconds(duration.nanos as i64);
+        let dur = ChronoDuration::seconds(duration.seconds)
+            + ChronoDuration::nanoseconds(duration.nanos as i64);
         fields.insert("single_duration".to_string(), Duration(dur));
     }
 
@@ -804,7 +834,11 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
         fields.insert("repeated_int64".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_uint32.is_empty() {
-        let values: Vec<CelValue> = msg.repeated_uint32.iter().map(|&v| UInt(v as u64)).collect();
+        let values: Vec<CelValue> = msg
+            .repeated_uint32
+            .iter()
+            .map(|&v| UInt(v as u64))
+            .collect();
         fields.insert("repeated_uint32".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_uint64.is_empty() {
@@ -812,7 +846,11 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
         fields.insert("repeated_uint64".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_float.is_empty() {
-        let values: Vec<CelValue> = msg.repeated_float.iter().map(|&v| Float(v as f64)).collect();
+        let values: Vec<CelValue> = msg
+            .repeated_float
+            .iter()
+            .map(|&v| Float(v as f64))
+            .collect();
         fields.insert("repeated_float".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_double.is_empty() {
@@ -824,11 +862,19 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
         fields.insert("repeated_bool".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_string.is_empty() {
-        let values: Vec<CelValue> = msg.repeated_string.iter().map(|v| String(Arc::new(v.clone()))).collect();
+        let values: Vec<CelValue> = msg
+            .repeated_string
+            .iter()
+            .map(|v| String(Arc::new(v.clone())))
+            .collect();
         fields.insert("repeated_string".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_bytes.is_empty() {
-        let values: Vec<CelValue> = msg.repeated_bytes.iter().map(|v| Bytes(Arc::new(v.to_vec()))).collect();
+        let values: Vec<CelValue> = msg
+            .repeated_bytes
+            .iter()
+            .map(|v| Bytes(Arc::new(v.to_vec())))
+            .collect();
         fields.insert("repeated_bytes".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_sint32.is_empty() {
@@ -840,7 +886,11 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
         fields.insert("repeated_sint64".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_fixed32.is_empty() {
-        let values: Vec<CelValue> = msg.repeated_fixed32.iter().map(|&v| UInt(v as u64)).collect();
+        let values: Vec<CelValue> = msg
+            .repeated_fixed32
+            .iter()
+            .map(|&v| UInt(v as u64))
+            .collect();
         fields.insert("repeated_fixed32".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_fixed64.is_empty() {
@@ -848,7 +898,11 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
         fields.insert("repeated_fixed64".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_sfixed32.is_empty() {
-        let values: Vec<CelValue> = msg.repeated_sfixed32.iter().map(|&v| Int(v as i64)).collect();
+        let values: Vec<CelValue> = msg
+            .repeated_sfixed32
+            .iter()
+            .map(|&v| Int(v as i64))
+            .collect();
         fields.insert("repeated_sfixed32".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_sfixed64.is_empty() {
@@ -856,7 +910,11 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
         fields.insert("repeated_sfixed64".to_string(), List(Arc::new(values)));
     }
     if !msg.repeated_nested_enum.is_empty() {
-        let values: Vec<CelValue> = msg.repeated_nested_enum.iter().map(|&v| Int(v as i64)).collect();
+        let values: Vec<CelValue> = msg
+            .repeated_nested_enum
+            .iter()
+            .map(|&v| Int(v as i64))
+            .collect();
         fields.insert("repeated_nested_enum".to_string(), List(Arc::new(values)));
     }
 
@@ -866,63 +924,90 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
         for (&k, &v) in &msg.map_int32_int64 {
             map_entries.insert(cel::objects::Key::Int(k as i64), Int(v));
         }
-        fields.insert("map_int32_int64".to_string(), cel::objects::Value::Map(cel::objects::Map {
-            map: Arc::new(map_entries),
-        }));
+        fields.insert(
+            "map_int32_int64".to_string(),
+            cel::objects::Value::Map(cel::objects::Map {
+                map: Arc::new(map_entries),
+            }),
+        );
     }
     if !msg.map_string_string.is_empty() {
         let mut map_entries = HashMap::new();
         for (k, v) in &msg.map_string_string {
-            map_entries.insert(cel::objects::Key::String(Arc::new(k.clone())), String(Arc::new(v.clone())));
+            map_entries.insert(
+                cel::objects::Key::String(Arc::new(k.clone())),
+                String(Arc::new(v.clone())),
+            );
         }
-        fields.insert("map_string_string".to_string(), cel::objects::Value::Map(cel::objects::Map {
-            map: Arc::new(map_entries),
-        }));
+        fields.insert(
+            "map_string_string".to_string(),
+            cel::objects::Value::Map(cel::objects::Map {
+                map: Arc::new(map_entries),
+            }),
+        );
     }
     if !msg.map_int64_int64.is_empty() {
         let mut map_entries = HashMap::new();
         for (&k, &v) in &msg.map_int64_int64 {
             map_entries.insert(cel::objects::Key::Int(k), Int(v));
         }
-        fields.insert("map_int64_int64".to_string(), cel::objects::Value::Map(cel::objects::Map {
-            map: Arc::new(map_entries),
-        }));
+        fields.insert(
+            "map_int64_int64".to_string(),
+            cel::objects::Value::Map(cel::objects::Map {
+                map: Arc::new(map_entries),
+            }),
+        );
     }
     if !msg.map_uint64_uint64.is_empty() {
         let mut map_entries = HashMap::new();
         for (&k, &v) in &msg.map_uint64_uint64 {
             map_entries.insert(cel::objects::Key::Uint(k), UInt(v));
         }
-        fields.insert("map_uint64_uint64".to_string(), cel::objects::Value::Map(cel::objects::Map {
-            map: Arc::new(map_entries),
-        }));
+        fields.insert(
+            "map_uint64_uint64".to_string(),
+            cel::objects::Value::Map(cel::objects::Map {
+                map: Arc::new(map_entries),
+            }),
+        );
     }
     if !msg.map_string_int64.is_empty() {
         let mut map_entries = HashMap::new();
         for (k, &v) in &msg.map_string_int64 {
             map_entries.insert(cel::objects::Key::String(Arc::new(k.clone())), Int(v));
         }
-        fields.insert("map_string_int64".to_string(), cel::objects::Value::Map(cel::objects::Map {
-            map: Arc::new(map_entries),
-        }));
+        fields.insert(
+            "map_string_int64".to_string(),
+            cel::objects::Value::Map(cel::objects::Map {
+                map: Arc::new(map_entries),
+            }),
+        );
     }
     if !msg.map_int32_string.is_empty() {
         let mut map_entries = HashMap::new();
         for (&k, v) in &msg.map_int32_string {
-            map_entries.insert(cel::objects::Key::Int(k as i64), String(Arc::new(v.clone())));
+            map_entries.insert(
+                cel::objects::Key::Int(k as i64),
+                String(Arc::new(v.clone())),
+            );
         }
-        fields.insert("map_int32_string".to_string(), cel::objects::Value::Map(cel::objects::Map {
-            map: Arc::new(map_entries),
-        }));
+        fields.insert(
+            "map_int32_string".to_string(),
+            cel::objects::Value::Map(cel::objects::Map {
+                map: Arc::new(map_entries),
+            }),
+        );
     }
     if !msg.map_bool_bool.is_empty() {
         let mut map_entries = HashMap::new();
         for (&k, &v) in &msg.map_bool_bool {
             map_entries.insert(cel::objects::Key::Bool(k), Bool(v));
         }
-        fields.insert("map_bool_bool".to_string(), cel::objects::Value::Map(cel::objects::Map {
-            map: Arc::new(map_entries),
-        }));
+        fields.insert(
+            "map_bool_bool".to_string(),
+            cel::objects::Value::Map(cel::objects::Map {
+                map: Arc::new(map_entries),
+            }),
+        );
     }
 
     // If oneof field wasn't set by prost decoding, try to parse it manually from wire format
@@ -936,8 +1021,23 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
     // Filter out reserved keyword fields (fields 500-516) that were formerly CEL reserved identifiers
     // These should not be exposed in the CEL representation
     let reserved_keywords = [
-        "as", "break", "const", "continue", "else", "for", "function", "if",
-        "import", "let", "loop", "package", "namespace", "return", "var", "void", "while"
+        "as",
+        "break",
+        "const",
+        "continue",
+        "else",
+        "for",
+        "function",
+        "if",
+        "import",
+        "let",
+        "loop",
+        "package",
+        "namespace",
+        "return",
+        "var",
+        "void",
+        "while",
     ];
     for keyword in &reserved_keywords {
         fields.remove(*keyword);
@@ -1086,7 +1186,9 @@ fn convert_test_all_types_proto2_to_struct(
                         child_fields.insert("payload".to_string(), payload_struct);
                     }
                     let child_struct = Struct(Struct {
-                        type_name: Arc::new("cel.expr.conformance.proto2.NestedTestAllTypes".to_string()),
+                        type_name: Arc::new(
+                            "cel.expr.conformance.proto2.NestedTestAllTypes".to_string(),
+                        ),
                         fields: Arc::new(child_fields),
                     });
                     nested_fields.insert("child".to_string(), child_struct);
@@ -1099,7 +1201,9 @@ fn convert_test_all_types_proto2_to_struct(
                 }
 
                 let nested_struct = Struct(Struct {
-                    type_name: Arc::new("cel.expr.conformance.proto2.NestedTestAllTypes".to_string()),
+                    type_name: Arc::new(
+                        "cel.expr.conformance.proto2.NestedTestAllTypes".to_string(),
+                    ),
                     fields: Arc::new(nested_fields),
                 });
                 fields.insert("oneof_type".to_string(), nested_struct);
@@ -1139,10 +1243,14 @@ fn convert_test_all_types_proto2_to_struct(
     if let Some(ref timestamp) = msg.single_timestamp {
         // Convert google.protobuf.Timestamp to CEL Timestamp
         use chrono::{DateTime, TimeZone, Utc};
-        let ts = Utc.timestamp_opt(timestamp.seconds, timestamp.nanos as u32)
+        let ts = Utc
+            .timestamp_opt(timestamp.seconds, timestamp.nanos as u32)
             .single()
             .ok_or_else(|| ConversionError::Unsupported("Invalid timestamp".to_string()))?;
-        let fixed_offset = DateTime::from_naive_utc_and_offset(ts.naive_utc(), chrono::FixedOffset::east_opt(0).unwrap());
+        let fixed_offset = DateTime::from_naive_utc_and_offset(
+            ts.naive_utc(),
+            chrono::FixedOffset::east_opt(0).unwrap(),
+        );
         fields.insert("single_timestamp".to_string(), Timestamp(fixed_offset));
     }
 
@@ -1161,7 +1269,8 @@ fn convert_test_all_types_proto2_to_struct(
     if let Some(ref duration) = msg.single_duration {
         // Convert google.protobuf.Duration to CEL Duration
         use chrono::Duration as ChronoDuration;
-        let dur = ChronoDuration::seconds(duration.seconds) + ChronoDuration::nanoseconds(duration.nanos as i64);
+        let dur = ChronoDuration::seconds(duration.seconds)
+            + ChronoDuration::nanoseconds(duration.nanos as i64);
         fields.insert("single_duration".to_string(), Duration(dur));
     }
 
@@ -1186,8 +1295,23 @@ fn convert_test_all_types_proto2_to_struct(
     // Filter out reserved keyword fields (fields 500-516) that were formerly CEL reserved identifiers
     // These should not be exposed in the CEL representation
     let reserved_keywords = [
-        "as", "break", "const", "continue", "else", "for", "function", "if",
-        "import", "let", "loop", "package", "namespace", "return", "var", "void", "while"
+        "as",
+        "break",
+        "const",
+        "continue",
+        "else",
+        "for",
+        "function",
+        "if",
+        "import",
+        "let",
+        "loop",
+        "package",
+        "namespace",
+        "return",
+        "var",
+        "void",
+        "while",
     ];
     for keyword in &reserved_keywords {
         fields.remove(*keyword);

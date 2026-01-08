@@ -179,7 +179,10 @@ pub fn double(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             // Handle special string values
             if v.eq_ignore_ascii_case("nan") {
                 Value::Float(f64::NAN)
-            } else if v.eq_ignore_ascii_case("inf") || v.eq_ignore_ascii_case("infinity") || v.as_str() == "+inf" {
+            } else if v.eq_ignore_ascii_case("inf")
+                || v.eq_ignore_ascii_case("infinity")
+                || v.as_str() == "+inf"
+            {
                 Value::Float(f64::INFINITY)
             } else if v.eq_ignore_ascii_case("-inf") || v.eq_ignore_ascii_case("-infinity") {
                 Value::Float(f64::NEG_INFINITY)
@@ -206,7 +209,10 @@ pub fn float(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             // Handle special string values
             let value_f64 = if v.eq_ignore_ascii_case("nan") {
                 f64::NAN
-            } else if v.eq_ignore_ascii_case("inf") || v.eq_ignore_ascii_case("infinity") || v.as_str() == "+inf" {
+            } else if v.eq_ignore_ascii_case("inf")
+                || v.eq_ignore_ascii_case("infinity")
+                || v.as_str() == "+inf"
+            {
                 f64::INFINITY
             } else if v.eq_ignore_ascii_case("-inf") || v.eq_ignore_ascii_case("-infinity") {
                 f64::NEG_INFINITY
@@ -1185,7 +1191,9 @@ mod tests {
         let mut context = Context::default();
         context.add_function("toTestEnum", {
             let enum_type = enum_type.clone();
-            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+            move |ftx: &crate::FunctionContext,
+                  value: i64|
+                  -> crate::functions::Result<crate::Value> {
                 super::convert_int_to_enum(ftx, enum_type.clone(), value)
             }
         });
@@ -1212,7 +1220,9 @@ mod tests {
         let mut context = Context::default();
         context.add_function("toTestEnum", {
             let enum_type = enum_type.clone();
-            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+            move |ftx: &crate::FunctionContext,
+                  value: i64|
+                  -> crate::functions::Result<crate::Value> {
                 super::convert_int_to_enum(ftx, enum_type.clone(), value)
             }
         });
@@ -1235,7 +1245,9 @@ mod tests {
         let mut context = Context::default();
         context.add_function("toTestEnum", {
             let enum_type = enum_type.clone();
-            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+            move |ftx: &crate::FunctionContext,
+                  value: i64|
+                  -> crate::functions::Result<crate::Value> {
                 super::convert_int_to_enum(ftx, enum_type.clone(), value)
             }
         });
@@ -1258,7 +1270,9 @@ mod tests {
         let mut context = Context::default();
         context.add_function("toSignedEnum", {
             let enum_type = enum_type.clone();
-            move |ftx: &crate::FunctionContext, value: i64| -> crate::functions::Result<crate::Value> {
+            move |ftx: &crate::FunctionContext,
+                  value: i64|
+                  -> crate::functions::Result<crate::Value> {
                 super::convert_int_to_enum(ftx, enum_type.clone(), value)
             }
         });
@@ -1287,7 +1301,11 @@ mod tests {
 
         // Variant 1: has() as condition (present case)
         let result1 = test_script("has({'a': 1}.a) ? 'present' : 'absent'", None);
-        assert_eq!(result1, Ok("present".into()), "presence_test_with_ternary_1");
+        assert_eq!(
+            result1,
+            Ok("present".into()),
+            "presence_test_with_ternary_1"
+        );
 
         // Variant 2: has() as condition (absent case)
         let result2 = test_script("has({'a': 1}.b) ? 'present' : 'absent'", None);
@@ -1314,10 +1332,14 @@ mod tests {
         match result {
             Err(ExecutionError::UnsupportedBinaryOperator(op, left, right)) => {
                 assert_eq!(op, "rem", "Expected 'rem' operator");
-                assert!(matches!(left, crate::objects::Value::String(_)),
-                    "Expected String on left side");
-                assert!(matches!(right, crate::objects::Value::Int(_)),
-                    "Expected Int on right side");
+                assert!(
+                    matches!(left, crate::objects::Value::String(_)),
+                    "Expected String on left side"
+                );
+                assert!(
+                    matches!(right, crate::objects::Value::Int(_)),
+                    "Expected Int on right side"
+                );
             }
             other => {
                 panic!("Expected UnsupportedBinaryOperator error, got: {:?}", other);

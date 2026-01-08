@@ -232,7 +232,10 @@ pub fn field_value_to_cel(field_value: &FieldValue) -> crate::objects::Value {
 /// bytewise comparison.
 pub fn compare_any_values_semantic(value_a: &[u8], value_b: &[u8]) -> bool {
     // Try to parse both as protobuf wire format
-    match (parse_proto_wire_format(value_a), parse_proto_wire_format(value_b)) {
+    match (
+        parse_proto_wire_format(value_a),
+        parse_proto_wire_format(value_b),
+    ) {
         (Some(map_a), Some(map_b)) => {
             // Compare the parsed field maps semantically
             compare_field_maps(&map_a, &map_b)

@@ -62,6 +62,8 @@ primary
     | leadingDot='.'? id=IDENTIFIER (op='(' args=exprList? ')')     # GlobalCall
     | '(' e=expr ')'                                                # Nested
     | op='[' elems=listInit? ','? ']'                               # CreateList
+    | op='[' result=expr '|' var=IDENTIFIER 'in' range=expr
+        (',' var2=IDENTIFIER)? (filter='&&' filterExpr=expr)? ']'   # ListComprehension
     | op='{' entries=mapInitializerList? ','? '}'                   # CreateStruct
     | leadingDot='.'? ids+=IDENTIFIER (ops+='.' ids+=IDENTIFIER)*
         op='{' entries=field_initializer_list? ','? '}'               # CreateMessage
@@ -137,6 +139,7 @@ PLUS : '+';
 STAR : '*';
 SLASH : '/';
 PERCENT : '%';
+PIPE : '|';
 CEL_TRUE : 'true';
 CEL_FALSE : 'false';
 NUL : 'null';

@@ -1,7 +1,7 @@
 use crate::common::ast;
 use crate::common::ast::{
-    operators, CallExpr, EntryExpr, Expr, IdedEntryExpr, IdedExpr, ListExpr, MapEntryExpr, MapExpr,
-    SelectExpr, SourceInfo, StructExpr, StructFieldExpr,
+    operators, CallExpr, ComprehensionExpr, EntryExpr, Expr, IdedEntryExpr, IdedExpr, ListExpr,
+    MapEntryExpr, MapExpr, SelectExpr, SourceInfo, StructExpr, StructFieldExpr,
 };
 use crate::common::value::CelVal;
 use crate::parser::gen::{
@@ -10,11 +10,12 @@ use crate::parser::gen::{
     ConstantLiteralContext, ConstantLiteralContextAttrs, CreateListContext, CreateMessageContext,
     CreateStructContext, DoubleContext, ExprContext, Field_initializer_listContext,
     GlobalCallContext, IdentContext, IndexContext, IndexContextAttrs, IntContext,
-    ListInitContextAll, LogicalNotContext, LogicalNotContextAttrs, MapInitializerListContextAll,
-    MemberCallContext, MemberCallContextAttrs, MemberExprContext, MemberExprContextAttrs,
-    NegateContext, NegateContextAttrs, NestedContext, NullContext, OptFieldContextAttrs,
-    PrimaryExprContext, PrimaryExprContextAttrs, RelationContext, RelationContextAttrs,
-    SelectContext, SelectContextAttrs, StartContext, StartContextAttrs, StringContext, UintContext,
+    ListComprehensionContext, ListInitContextAll,
+    LogicalNotContext, LogicalNotContextAttrs, MapInitializerListContextAll, MemberCallContext,
+    MemberCallContextAttrs, MemberExprContext, MemberExprContextAttrs, NegateContext,
+    NegateContextAttrs, NestedContext, NullContext, OptFieldContextAttrs, PrimaryExprContext,
+    PrimaryExprContextAttrs, RelationContext, RelationContextAttrs, SelectContext,
+    SelectContextAttrs, StartContext, StartContextAttrs, StringContext, UintContext,
 };
 use crate::parser::{gen, macros, parse};
 use antlr4rust::common_token_stream::CommonTokenStream;
@@ -871,6 +872,75 @@ impl gen::CELVisitorCompat<'_> for Parser {
         IdedExpr {
             id: list_id,
             expr: Expr::List(ListExpr::new_with_optionals(elements, optionals)),
+        }
+    }
+
+    fn visit_ListComprehension(&mut self, ctx: &ListComprehensionContext<'_>) -> Self::Return {
+        let comp_id = self.helper.next_id_for_token(ctx.op.as_deref());
+
+        // Get the iteration variable name
+        let iter_var = ctx.var.as_ref().map(|t| t.get_text().to_string()).unwrap_or_default();
+
+        // Get optional second variable for map iteration
+        let iter_var2 = ctx.var2.as_ref().map(|t| t.get_text().to_string());
+
+        // Visit the range expression
+        let iter_range = ctx.range.as_ref().map(|r| self.visit(r.deref())).unwrap_or_default();
+
+        // Visit the result expression
+        let result_expr = ctx.result.as_ref().map(|r| self.visit(r.deref())).unwrap_or_default();
+
+        // Initialize accumulator variable
+        let accu_var = "@c:accu".to_string();
+        let accu_init = self.helper.next_expr_for(comp_id, Expr::List(ListExpr { elements: vec![], optional_indices: vec![] }));
+
+        // Loop condition: always true (we always iterate through all elements)
+        let loop_cond = self.helper.next_expr_for(comp_id, Expr::Literal(CelVal::Boolean(true)));
+
+        // Build the loop step
+        let loop_step = if ctx.filter.is_some() && ctx.filterExpr.is_some() {
+            // If there's a filter, use conditional add
+            let filter_expr = self.visit(ctx.filterExpr.as_ref().unwrap().deref());
+            let accu_ident = self.helper.next_expr_for(comp_id, Expr::Ident(accu_var.clone()));
+            // Wrap result in a list before adding
+            let result_list = self.helper.next_expr_for(comp_id, Expr::List(ListExpr::new(vec![result_expr.clone()])));
+            let list_with_result = self.helper.next_expr_for(comp_id, Expr::Call(CallExpr {
+                func_name: operators::ADD.to_string(),
+                target: None,
+                args: vec![accu_ident.clone(), result_list],
+            }));
+            self.helper.next_expr_for(comp_id, Expr::Call(CallExpr {
+                func_name: operators::CONDITIONAL.to_string(),
+                target: None,
+                args: vec![filter_expr, list_with_result, accu_ident],
+            }))
+        } else {
+            // No filter, just add the result to the accumulator
+            let accu_ident = self.helper.next_expr_for(comp_id, Expr::Ident(accu_var.clone()));
+            // Wrap result in a list before adding
+            let result_list = self.helper.next_expr_for(comp_id, Expr::List(ListExpr::new(vec![result_expr])));
+            self.helper.next_expr_for(comp_id, Expr::Call(CallExpr {
+                func_name: operators::ADD.to_string(),
+                target: None,
+                args: vec![accu_ident, result_list],
+            }))
+        };
+
+        // Result is the accumulator
+        let result = self.helper.next_expr_for(comp_id, Expr::Ident(accu_var.clone()));
+
+        IdedExpr {
+            id: comp_id,
+            expr: Expr::Comprehension(Box::new(ComprehensionExpr {
+                iter_range,
+                iter_var,
+                iter_var2,
+                accu_var,
+                accu_init,
+                loop_cond,
+                loop_step,
+                result,
+            })),
         }
     }
 
@@ -1925,23 +1995,17 @@ _?_:_(
 ERROR: <input>:1:2: Syntax error: token recognition error at: '@'
 | *@a | b
 | .^
-ERROR: <input>:1:5: Syntax error: token recognition error at: '| '
+ERROR: <input>:1:5: Syntax error: mismatched input '|' expecting {<EOF>, '==', '!=', 'in', '<', '<=', '>=', '>', '&&', '||', '[', '.', '-', '?', '+', '*', '/', '%'}
 | *@a | b
-| ....^
-ERROR: <input>:1:7: Syntax error: extraneous input 'b' expecting <EOF>
-| *@a | b
-| ......^",
+| ....^",
                 ..Default::default()
             },
             TestInfo {
                 i: "a | b",
                 p: "",
-                e: "ERROR: <input>:1:3: Syntax error: token recognition error at: '| '
+                e: "ERROR: <input>:1:3: Syntax error: mismatched input '|' expecting {<EOF>, '==', '!=', 'in', '<', '<=', '>=', '>', '&&', '||', '[', '.', '-', '?', '+', '*', '/', '%'}
 | a | b
-| ..^
-ERROR: <input>:1:5: Syntax error: extraneous input 'b' expecting <EOF>
-| a | b
-| ....^",
+| ..^",
                 ..Default::default()
             },
             TestInfo {

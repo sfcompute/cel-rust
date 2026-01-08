@@ -912,14 +912,18 @@ impl Value {
                                             // Try extension field lookup if regular key not found
                                             if let Some(registry) = ctx.get_extension_registry() {
                                                 // Try to get message type from the map
-                                                let message_type = map.map.get(&"@type".into())
+                                                let message_type = map
+                                                    .map
+                                                    .get(&"@type".into())
                                                     .and_then(|v| match v {
                                                         Value::String(s) => Some(s.as_str()),
                                                         _ => None,
                                                     })
                                                     .unwrap_or("");
 
-                                                if let Some(ext_value) = registry.resolve_extension(message_type, &property) {
+                                                if let Some(ext_value) = registry
+                                                    .resolve_extension(message_type, &property)
+                                                {
                                                     Ok(ext_value)
                                                 } else {
                                                     Err(ExecutionError::NoSuchKey(property))
@@ -1096,14 +1100,18 @@ impl Value {
                                 // For Map values, try to determine the message type
                                 if let Value::Map(ref map) = left {
                                     // Try to get a type name from the map (if it has one)
-                                    let message_type = map.map.get(&"@type".into())
+                                    let message_type = map
+                                        .map
+                                        .get(&"@type".into())
                                         .and_then(|v| match v {
                                             Value::String(s) => Some(s.as_str()),
                                             _ => None,
                                         })
                                         .unwrap_or(""); // Default empty type
 
-                                    if let Some(ext_value) = registry.resolve_extension(message_type, &select.field) {
+                                    if let Some(ext_value) =
+                                        registry.resolve_extension(message_type, &select.field)
+                                    {
                                         return Ok(ext_value);
                                     }
                                 }
@@ -1230,7 +1238,8 @@ impl Value {
         match self {
             Value::Map(ref m) => {
                 // For maps, look up the field and return NoSuchKey if not found
-                m.map.get(&name.clone().into())
+                m.map
+                    .get(&name.clone().into())
                     .cloned()
                     .ok_or_else(|| ExecutionError::NoSuchKey(name.clone()))
                     .into()
@@ -1786,7 +1795,10 @@ mod tests {
 
         // Create a message with extension support
         let mut msg = HashMap::new();
-        msg.insert("@type".to_string(), Value::String(Arc::new("test.Message".to_string())));
+        msg.insert(
+            "@type".to_string(),
+            Value::String(Arc::new("test.Message".to_string())),
+        );
         msg.insert("regular_field".to_string(), Value::Int(10));
         ctx.add_variable_from_value("msg", msg);
 

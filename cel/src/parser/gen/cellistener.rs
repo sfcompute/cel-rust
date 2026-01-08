@@ -197,6 +197,18 @@ pub trait CELListener<'input>: ParseTreeListener<'input, CELParserContextType> {
      */
     fn exit_CreateList(&mut self, _ctx: &CreateListContext<'input>) {}
     /**
+     * Enter a parse tree produced by the {@code ListComprehension}
+     * labeled alternative in {@link CELParser#primary}.
+     * @param ctx the parse tree
+     */
+    fn enter_ListComprehension(&mut self, _ctx: &ListComprehensionContext<'input>) {}
+    /**
+     * Exit a parse tree produced by the {@code ListComprehension}
+     * labeled alternative in {@link CELParser#primary}.
+     * @param ctx the parse tree
+     */
+    fn exit_ListComprehension(&mut self, _ctx: &ListComprehensionContext<'input>) {}
+    /**
      * Enter a parse tree produced by the {@code CreateStruct}
      * labeled alternative in {@link CELParser#primary}.
      * @param ctx the parse tree

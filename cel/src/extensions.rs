@@ -52,7 +52,10 @@ impl ExtensionRegistry {
     /// Gets an extension field value for a specific message
     pub fn get_extension_value(&self, message_type: &str, ext_name: &str) -> Option<&Value> {
         // Try direct lookup first
-        if let Some(values) = self.extension_values.get(&format!("{}:{}", message_type, ext_name)) {
+        if let Some(values) = self
+            .extension_values
+            .get(&format!("{}:{}", message_type, ext_name))
+        {
             if let Some(value) = values.get(ext_name) {
                 return Some(value);
             }
@@ -133,7 +136,8 @@ mod tests {
         );
 
         // Retrieve the extension value
-        let value = registry.get_extension_value("com.example.MyMessage", "com.example.my_extension");
+        let value =
+            registry.get_extension_value("com.example.MyMessage", "com.example.my_extension");
         assert_eq!(value, Some(&Value::Int(42)));
     }
 
@@ -156,9 +160,6 @@ mod tests {
         );
 
         let value = registry.resolve_extension("com.example.MyMessage", "NestedMessage.nested_ext");
-        assert_eq!(
-            value,
-            Some(Value::String(Arc::new("test".to_string())))
-        );
+        assert_eq!(value, Some(Value::String(Arc::new("test".to_string()))));
     }
 }
