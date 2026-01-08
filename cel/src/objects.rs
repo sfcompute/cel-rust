@@ -113,6 +113,70 @@ pub enum Key {
     Uint(u64),
     Bool(bool),
     String(Arc<String>),
+    Float(OrderedFloat),
+}
+
+/// A wrapper around f64 that implements Eq, Hash, and Ord for use as map keys.
+/// This uses total ordering where NaN == NaN and NaN is ordered after all other values.
+#[derive(Debug, Clone, Copy)]
+pub struct OrderedFloat(f64);
+
+impl OrderedFloat {
+    pub fn new(value: f64) -> Self {
+        OrderedFloat(value)
+    }
+
+    pub fn value(&self) -> f64 {
+        self.0
+    }
+}
+
+impl From<f64> for OrderedFloat {
+    fn from(value: f64) -> Self {
+        OrderedFloat(value)
+    }
+}
+
+impl PartialEq for OrderedFloat {
+    fn eq(&self, other: &Self) -> bool {
+        if self.0.is_nan() && other.0.is_nan() {
+            true
+        } else {
+            self.0 == other.0
+        }
+    }
+}
+
+impl Eq for OrderedFloat {}
+
+impl PartialOrd for OrderedFloat {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderedFloat {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // NaN is considered equal to itself and greater than all other values
+        match (self.0.is_nan(), other.0.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => self.0.partial_cmp(&other.0).unwrap_or(Ordering::Equal),
+        }
+    }
+}
+
+impl std::hash::Hash for OrderedFloat {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        if self.0.is_nan() {
+            // Hash all NaNs to the same value
+            0xFFFF_FFFF_FFFF_FFFFu64.hash(state);
+        } else {
+            // Convert to bits for deterministic hashing
+            self.0.to_bits().hash(state);
+        }
+    }
 }
 
 /// Implement conversions from primitive types to [`Key`]
@@ -174,6 +238,7 @@ impl serde::Serialize for Key {
             Key::Uint(v) => v.serialize(serializer),
             Key::Bool(v) => v.serialize(serializer),
             Key::String(v) => v.serialize(serializer),
+            Key::Float(v) => v.value().serialize(serializer),
         }
     }
 }
@@ -185,6 +250,7 @@ impl Display for Key {
             Key::Uint(v) => write!(f, "{v}"),
             Key::Bool(v) => write!(f, "{v}"),
             Key::String(v) => write!(f, "{v}"),
+            Key::Float(v) => write!(f, "{}", v.value()),
         }
     }
 }
@@ -200,6 +266,7 @@ impl TryInto<Key> for Value {
             Value::UInt(v) => Ok(Key::Uint(v)),
             Value::String(v) => Ok(Key::String(v)),
             Value::Bool(v) => Ok(Key::Bool(v)),
+            Value::Float(v) => Ok(Key::Float(OrderedFloat::new(v))),
             _ => Err(self),
         }
     }
@@ -657,6 +724,7 @@ impl From<&Key> for Value {
             Key::Uint(v) => Value::UInt(*v),
             Key::Bool(v) => Value::Bool(*v),
             Key::String(v) => Value::String(v.clone()),
+            Key::Float(v) => Value::Float(v.value()),
         }
     }
 }
@@ -668,6 +736,7 @@ impl From<Key> for Value {
             Key::Uint(v) => Value::UInt(v),
             Key::Bool(v) => Value::Bool(v),
             Key::String(v) => Value::String(v),
+            Key::Float(v) => Value::Float(v.value()),
         }
     }
 }
@@ -948,6 +1017,12 @@ impl Value {
                                         ExecutionError::NoSuchKey(property.to_string().into())
                                     })
                                 }
+                                (Value::Map(map), Value::Float(property)) => {
+                                    let key: Key = Key::Float(OrderedFloat::new(property));
+                                    map.get(&key).cloned().ok_or_else(|| {
+                                        ExecutionError::NoSuchKey(property.to_string().into())
+                                    })
+                                }
                                 (Value::Map(_), index) => {
                                     Err(ExecutionError::UnsupportedMapIndex(index))
                                 }
@@ -1144,7 +1219,7 @@ impl Value {
                         EntryExpr::StructField(_) => panic!("WAT?"),
                         EntryExpr::MapEntry(e) => (&e.key, &e.value, e.optional),
                     };
-                    let key = Value::resolve(k, ctx)?
+                    let key: Key = Value::resolve(k, ctx)?
                         .try_into()
                         .map_err(ExecutionError::UnsupportedKeyType)?;
                     let value = Value::resolve(v, ctx)?;
@@ -1152,12 +1227,21 @@ impl Value {
                     if is_optional {
                         if let Ok(opt_val) = <&OptionalValue>::try_from(&value) {
                             if let Some(inner) = opt_val.value() {
+                                if map.contains_key(&key) {
+                                    return Err(ExecutionError::DuplicateKey(key.to_string()));
+                                }
                                 map.insert(key, inner.clone());
                             }
                         } else {
+                            if map.contains_key(&key) {
+                                return Err(ExecutionError::DuplicateKey(key.to_string()));
+                            }
                             map.insert(key, value);
                         }
                     } else {
+                        if map.contains_key(&key) {
+                            return Err(ExecutionError::DuplicateKey(key.to_string()));
+                        }
                         map.insert(key, value);
                     }
                 }
@@ -1482,7 +1566,7 @@ fn checked_op(
 
 #[cfg(test)]
 mod tests {
-    use crate::{objects::Key, Context, ExecutionError, Program, Value};
+    use crate::{objects::{Key, OrderedFloat}, Context, ExecutionError, Program, Value};
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -2341,6 +2425,82 @@ mod tests {
                     map: Arc::from(HashMap::new())
                 }))
             );
+        }
+    }
+
+    #[test]
+    fn test_float_key_support() {
+        // Test map with float keys
+        let mut context = Context::default();
+        let mut numbers = HashMap::new();
+        numbers.insert(Key::Float(OrderedFloat::new(3.0)), "three".to_string());
+        numbers.insert(Key::Float(OrderedFloat::new(1.5)), "one point five".to_string());
+        context.add_variable_from_value("numbers", numbers);
+
+        // Test accessing map with float key
+        let program = Program::compile("numbers[3.0]").unwrap();
+        let value = program.execute(&context).unwrap();
+        assert_eq!(value, "three".into());
+
+        let program = Program::compile("numbers[1.5]").unwrap();
+        let value = program.execute(&context).unwrap();
+        assert_eq!(value, "one point five".into());
+    }
+
+    #[test]
+    fn test_heterogeneous_map_keys() {
+        // Test map construction with mixed numeric key types (int and float)
+        let program = Program::compile("{1: 'int', 3.0: 'float'}").unwrap();
+        let value = program.execute(&Context::default()).unwrap();
+
+        if let Value::Map(map) = value {
+            assert_eq!(map.map.len(), 2);
+            assert_eq!(map.get(&Key::Int(1)), Some(&Value::String(Arc::new("int".to_string()))));
+            assert_eq!(map.get(&Key::Float(OrderedFloat::new(3.0))), Some(&Value::String(Arc::new("float".to_string()))));
+        } else {
+            panic!("Expected a map");
+        }
+    }
+
+    #[test]
+    fn test_duplicate_key_detection() {
+        // Test that duplicate keys cause an error
+        let program = Program::compile("{1: 'first', 1: 'second'}").unwrap();
+        let result = program.execute(&Context::default());
+
+        match result {
+            Err(ExecutionError::DuplicateKey(key)) => {
+                assert_eq!(key, "1");
+            }
+            _ => panic!("Expected DuplicateKey error, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_duplicate_string_key_detection() {
+        // Test that duplicate string keys cause an error
+        let program = Program::compile(r#"{"a": 1, "b": 2, "a": 3}"#).unwrap();
+        let result = program.execute(&Context::default());
+
+        match result {
+            Err(ExecutionError::DuplicateKey(key)) => {
+                assert_eq!(key, "a");
+            }
+            _ => panic!("Expected DuplicateKey error, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_duplicate_float_key_detection() {
+        // Test that duplicate float keys cause an error
+        let program = Program::compile("{3.0: 'first', 3.0: 'second'}").unwrap();
+        let result = program.execute(&Context::default());
+
+        match result {
+            Err(ExecutionError::DuplicateKey(key)) => {
+                assert_eq!(key, "3");
+            }
+            _ => panic!("Expected DuplicateKey error, got: {:?}", result),
         }
     }
 }

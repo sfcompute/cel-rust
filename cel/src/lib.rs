@@ -60,6 +60,9 @@ pub enum ExecutionError {
     /// but the type of the value was not supported as a key.
     #[error("Unable to use value '{0:?}' as a key")]
     UnsupportedKeyType(Value),
+    /// Indicates that the script attempted to create a map with duplicate keys.
+    #[error("Duplicate map key: {0}")]
+    DuplicateKey(String),
     #[error("Unexpected type: got '{got}', want '{want}'")]
     UnexpectedType { got: String, want: String },
     /// Indicates that the script attempted to reference a key on a type that
