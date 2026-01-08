@@ -68,6 +68,10 @@ pub struct SelectExpr {
     pub operand: Box<IdedExpr>,
     pub field: String,
     pub test: bool,
+    /// is_extension indicates whether the field access uses protobuf extension syntax.
+    /// Extension fields are accessed using msg.(ext.field) syntax where the parentheses
+    /// indicate an extension field lookup.
+    pub is_extension: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
