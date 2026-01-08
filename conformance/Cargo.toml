@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.82.0"
 
 [dependencies]
-cel = { path = "../cel", features = ["json", "proto"] }
+cel = { path = "../cel", features = ["json"] }
 prost = "0.12"
 prost-types = "0.12"
 prost-reflect = { version = "0.13", features = ["text-format"] }
