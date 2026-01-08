@@ -1268,8 +1268,16 @@ impl Value {
                     .ok_or_else(|| ExecutionError::NoSuchKey(name.clone()))
                     .into()
             }
+            Value::Struct(ref s) => {
+                // For structs, look up the field by name
+                s.fields
+                    .get(name.as_str())
+                    .cloned()
+                    .ok_or_else(|| ExecutionError::NoSuchKey(name.clone()))
+                    .into()
+            }
             _ => {
-                // For non-map types, accessing a field is always an error
+                // For non-map/non-struct types, accessing a field is always an error
                 // Return NoSuchKey to indicate the field doesn't exist on this type
                 ExecutionError::NoSuchKey(name.clone()).into()
             }

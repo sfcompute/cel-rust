@@ -222,16 +222,23 @@ impl Default for Context<'_> {
         ctx.add_function("min", functions::min);
         ctx.add_function("startsWith", functions::starts_with);
         ctx.add_function("endsWith", functions::ends_with);
+        ctx.add_function("isNaN", functions::is_nan);
+        ctx.add_function("isInf", functions::is_inf);
+        ctx.add_function("isFinite", functions::is_finite);
+        ctx.add_function("ceil", functions::ceil);
+        ctx.add_function("floor", functions::floor);
+        ctx.add_function("trunc", functions::trunc);
+        ctx.add_function("round", functions::round);
         ctx.add_function("string", functions::string);
         ctx.add_function("bytes", functions::bytes);
         ctx.add_function("double", functions::double);
         ctx.add_function("float", functions::float);
         ctx.add_function("int", functions::int);
         ctx.add_function("uint", functions::uint);
-        ctx.add_function("dyn", functions::dyn_conversion);
         ctx.add_function("list", functions::list);
         ctx.add_function("map", functions::map);
         ctx.add_function("null_type", functions::null_type);
+        ctx.add_function("dyn", functions::dyn_conversion);
         ctx.add_function("optional.none", functions::optional_none);
         ctx.add_function("optional.of", functions::optional_of);
         ctx.add_function(
