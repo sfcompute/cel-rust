@@ -390,6 +390,20 @@ impl Parser {
         self.errors.push(e);
         expr
     }
+
+    fn is_reserved_keyword(ident: &str) -> bool {
+        matches!(
+            ident,
+            // CEL language keywords
+            "true" | "false" | "null" | "in" |
+            // Flow control keywords (reserved for future use)
+            "if" | "else" | "for" | "while" | "loop" | "break" | "continue" | "return" |
+            // Type/Declaration keywords (reserved for future use)
+            "var" | "const" | "let" | "function" | "void" |
+            // Module keywords (reserved for future use)
+            "import" | "package" | "namespace" | "as"
+        )
+    }
 }
 
 struct RecursionListener {
@@ -822,6 +836,16 @@ impl gen::CELVisitorCompat<'_> for Parser {
             }
             Some(id) => {
                 let ident = id.clone().text;
+
+                // Check if the identifier is a reserved keyword
+                if Self::is_reserved_keyword(&ident) {
+                    return self.report_error::<ParseError, _>(
+                        id.deref(),
+                        None,
+                        format!("'{}' is a reserved keyword", ident),
+                    );
+                }
+
                 self.helper
                     .next_expr(id.deref(), Expr::Ident(ident.to_string()))
             }
@@ -832,9 +856,20 @@ impl gen::CELVisitorCompat<'_> for Parser {
         match &ctx.id {
             None => IdedExpr::default(),
             Some(id) => {
-                let mut id = id.get_text().to_string();
+                let ident_text = id.get_text().to_string();
+
+                // Check if the identifier is a reserved keyword (before adding leading dot)
+                if Self::is_reserved_keyword(&ident_text) {
+                    return self.report_error::<ParseError, _>(
+                        id,
+                        None,
+                        format!("'{}' is a reserved keyword", ident_text),
+                    );
+                }
+
+                let mut full_id = ident_text;
                 if ctx.leadingDot.is_some() {
-                    id = format!(".{id}");
+                    full_id = format!(".{full_id}");
                 }
                 let op_id = self.helper.next_id_for_token(ctx.op.as_deref());
                 let args = ctx
@@ -843,7 +878,7 @@ impl gen::CELVisitorCompat<'_> for Parser {
                     .flat_map(|arg| &arg.e)
                     .map(|arg| self.visit(arg.deref()))
                     .collect::<Vec<IdedExpr>>();
-                self.global_call_or_macro(op_id, id, args)
+                self.global_call_or_macro(op_id, full_id, args)
             }
         }
     }
@@ -1203,6 +1238,72 @@ mod tests {
 
         "#;
         assert!(Parser::new().parse(expression).is_ok());
+    }
+
+    #[test]
+    fn test_reserved_keywords() {
+        // Test that reserved keywords are rejected as identifiers
+        // Note: true, false, null, and in are handled by the lexer/grammar directly
+        // so they never reach the identifier validation code
+        let reserved_keywords = [
+            // Flow control keywords (reserved for future use)
+            "if", "else", "for", "while", "loop", "break", "continue", "return",
+            // Type/Declaration keywords (reserved for future use)
+            "var", "const", "let", "function", "void",
+            // Module keywords (reserved for future use)
+            "import", "package", "namespace", "as",
+        ];
+
+        for keyword in reserved_keywords {
+            // Test as identifier
+            let result = Parser::new().parse(keyword);
+            assert!(
+                result.is_err(),
+                "Reserved keyword '{}' should be rejected as identifier",
+                keyword
+            );
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("reserved keyword"),
+                "Error for '{}' should mention 'reserved keyword', got: {}",
+                keyword,
+                err_msg
+            );
+
+            // Test as function call
+            let expr = format!("{}()", keyword);
+            let result = Parser::new().parse(&expr);
+            assert!(
+                result.is_err(),
+                "Reserved keyword '{}' should be rejected as function name",
+                keyword
+            );
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("reserved keyword"),
+                "Error for '{}()' should mention 'reserved keyword', got: {}",
+                keyword,
+                err_msg
+            );
+        }
+
+        // Test that reserved keywords are allowed as field names (intentional)
+        let valid_expressions = [
+            "obj.if",
+            "obj.for",
+            "obj.while",
+            "obj.return",
+            "obj.var",
+        ];
+
+        for expr in valid_expressions {
+            let result = Parser::new().parse(expr);
+            assert!(
+                result.is_ok(),
+                "Reserved keyword should be allowed as field name: {}",
+                expr
+            );
+        }
     }
 
     #[test]
