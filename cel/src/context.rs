@@ -37,11 +37,13 @@ pub enum Context<'a> {
         variables: BTreeMap<String, Value>,
         resolver: Option<&'a dyn VariableResolver>,
         extensions: ExtensionRegistry,
+        container: Option<String>,
     },
     Child {
         parent: &'a Context<'a>,
         variables: BTreeMap<String, Value>,
         resolver: Option<&'a dyn VariableResolver>,
+        container: Option<String>,
     },
 }
 
@@ -102,6 +104,7 @@ impl<'a> Context<'a> {
                 variables,
                 parent,
                 resolver,
+                ..
             } => resolver
                 .and_then(|r| r.resolve(name))
                 .or_else(|| {
@@ -165,7 +168,20 @@ impl<'a> Context<'a> {
             parent: self,
             variables: Default::default(),
             resolver: None,
+            container: None,
         }
+    }
+
+    pub fn with_container(mut self, container: String) -> Self {
+        match &mut self {
+            Context::Root { container: c, .. } => {
+                *c = Some(container);
+            }
+            Context::Child { container: c, .. } => {
+                *c = Some(container);
+            }
+        }
+        self
     }
 
     /// Constructs a new empty context with no variables or functions.
@@ -185,6 +201,7 @@ impl<'a> Context<'a> {
             functions: Default::default(),
             resolver: None,
             extensions: ExtensionRegistry::new(),
+            container: None,
         }
     }
 }
@@ -196,6 +213,7 @@ impl Default for Context<'_> {
             functions: Default::default(),
             resolver: None,
             extensions: ExtensionRegistry::new(),
+            container: None,
         };
 
         ctx.add_function("contains", functions::contains);
