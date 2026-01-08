@@ -1207,7 +1207,40 @@ impl Value {
                 }
                 Value::resolve(&comprehension.result, &ctx)
             }
-            Expr::Struct(_) => todo!("Support structs!"),
+            Expr::Struct(struct_expr) => {
+                let mut fields = HashMap::with_capacity(struct_expr.entries.len());
+                for entry in struct_expr.entries.iter() {
+                    let (field_name, field_value, is_optional) = match &entry.expr {
+                        EntryExpr::StructField(field_expr) => {
+                            (&field_expr.field, &field_expr.value, field_expr.optional)
+                        }
+                        EntryExpr::MapEntry(_) => {
+                            return Err(ExecutionError::function_error(
+                                "struct",
+                                "Map entries not allowed in struct literals",
+                            ));
+                        }
+                    };
+                    let value = Value::resolve(field_value, ctx)?;
+
+                    if is_optional {
+                        if let Ok(opt_val) = <&OptionalValue>::try_from(&value) {
+                            if let Some(inner) = opt_val.value() {
+                                fields.insert(field_name.clone(), inner.clone());
+                            }
+                        } else {
+                            fields.insert(field_name.clone(), value);
+                        }
+                    } else {
+                        fields.insert(field_name.clone(), value);
+                    }
+                }
+                Value::Struct(Struct {
+                    type_name: Arc::new(struct_expr.type_name.clone()),
+                    fields: Arc::new(fields),
+                })
+                .into()
+            }
             Expr::Unspecified => panic!("Can't evaluate Unspecified Expr"),
         }
     }

@@ -228,6 +228,10 @@ impl Default for Context<'_> {
         ctx.add_function("float", functions::float);
         ctx.add_function("int", functions::int);
         ctx.add_function("uint", functions::uint);
+        ctx.add_function("dyn", functions::dyn_conversion);
+        ctx.add_function("list", functions::list);
+        ctx.add_function("map", functions::map);
+        ctx.add_function("null_type", functions::null_type);
         ctx.add_function("optional.none", functions::optional_none);
         ctx.add_function("optional.of", functions::optional_of);
         ctx.add_function(

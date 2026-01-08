@@ -302,6 +302,37 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     })
 }
 
+// Type denotation function for dyn - returns the value as-is (identity function).
+// The dyn() function serves as a type marker in CEL's type system, allowing any value
+// to be treated as having dynamic type while preserving the actual runtime value.
+pub fn dyn_conversion(_ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(this)
+}
+
+// Type denotation function for list - returns lists as-is (identity function for lists).
+pub fn list(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::List(_) => Ok(this),
+        v => Err(ftx.error(format!("cannot convert {v:?} to list"))),
+    }
+}
+
+// Type denotation function for map - returns maps as-is (identity function for maps).
+pub fn map(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Map(_) => Ok(this),
+        v => Err(ftx.error(format!("cannot convert {v:?} to map"))),
+    }
+}
+
+// Type denotation function for null_type - returns null as-is (identity function for null).
+pub fn null_type(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    match this {
+        Value::Null => Ok(this),
+        v => Err(ftx.error(format!("cannot convert {v:?} to null_type"))),
+    }
+}
+
 pub fn optional_none(ftx: &FunctionContext) -> Result<Value> {
     if ftx.this.is_some() || !ftx.args.is_empty() {
         return Err(ftx.error("unsupported function"));
