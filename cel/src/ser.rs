@@ -256,7 +256,9 @@ impl ser::Serializer for Serializer {
     }
 
     fn serialize_f32(self, v: f32) -> Result<Value> {
-        self.serialize_f64(f64::from(v))
+        // Convert f32 to f64, but preserve f32 semantics for special values
+        let as_f64 = f64::from(v);
+        Ok(Value::Float(as_f64))
     }
 
     fn serialize_f64(self, v: f64) -> Result<Value> {
