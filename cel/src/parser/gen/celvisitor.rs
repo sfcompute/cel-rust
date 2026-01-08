@@ -156,6 +156,15 @@ pub trait CELVisitor<'input>: ParseTreeVisitor<'input, CELParserContextType> {
     }
 
     /**
+     * Visit a parse tree produced by the {@code ListComprehension}
+     * labeled alternative in {@link CELParser#primary}.
+     * @param ctx the parse tree
+     */
+    fn visit_ListComprehension(&mut self, ctx: &ListComprehensionContext<'input>) {
+        self.visit_children(ctx)
+    }
+
+    /**
      * Visit a parse tree produced by the {@code CreateStruct}
      * labeled alternative in {@link CELParser#primary}.
      * @param ctx the parse tree
@@ -472,6 +481,15 @@ pub trait CELVisitorCompat<'input>:
     }
 
     /**
+     * Visit a parse tree produced by the {@code ListComprehension}
+     * labeled alternative in {@link CELParser#primary}.
+     * @param ctx the parse tree
+     */
+    fn visit_ListComprehension(&mut self, ctx: &ListComprehensionContext<'input>) -> Self::Return {
+        self.visit_children(ctx)
+    }
+
+    /**
      * Visit a parse tree produced by the {@code CreateStruct}
      * labeled alternative in {@link CELParser#primary}.
      * @param ctx the parse tree
@@ -729,6 +747,11 @@ where
 
     fn visit_CreateList(&mut self, ctx: &CreateListContext<'input>) {
         let result = <Self as CELVisitorCompat>::visit_CreateList(self, ctx);
+        *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
+    }
+
+    fn visit_ListComprehension(&mut self, ctx: &ListComprehensionContext<'input>) {
+        let result = <Self as CELVisitorCompat>::visit_ListComprehension(self, ctx);
         *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
     }
 

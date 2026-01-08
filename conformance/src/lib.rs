@@ -22,7 +22,7 @@ mod tests {
 
     fn run_conformance_tests(category: Option<&str>) -> TestResults {
         let test_data_dir = get_test_data_dir();
-        
+
         if !test_data_dir.exists() {
             panic!(
                 "Test data directory not found at: {}\n\
@@ -37,7 +37,9 @@ mod tests {
             runner = runner.with_category_filter(category.to_string());
         }
 
-        runner.run_all_tests().expect("Failed to run conformance tests")
+        runner
+            .run_all_tests()
+            .expect("Failed to run conformance tests")
     }
 
     #[test]
@@ -70,7 +72,10 @@ mod tests {
         let results = run_conformance_tests(Some("Dynamic type operations"));
         results.print_summary();
         if !results.failed.is_empty() {
-            panic!("{} dynamic type operation test(s) failed", results.failed.len());
+            panic!(
+                "{} dynamic type operation test(s) failed",
+                results.failed.len()
+            );
         }
     }
 
@@ -146,4 +151,3 @@ mod tests {
         }
     }
 }
-

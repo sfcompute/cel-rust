@@ -26,20 +26,16 @@ fn get_enum_value_by_name(type_name: &str, name: &str) -> Option<i64> {
             }
         }
         "cel.expr.conformance.proto2.TestAllTypes.NestedEnum"
-        | "cel.expr.conformance.proto3.TestAllTypes.NestedEnum" => {
-            match name {
-                "FOO" => Some(0),
-                "BAR" => Some(1),
-                "BAZ" => Some(2),
-                _ => None,
-            }
-        }
-        "google.protobuf.NullValue" => {
-            match name {
-                "NULL_VALUE" => Some(0),
-                _ => None,
-            }
-        }
+        | "cel.expr.conformance.proto3.TestAllTypes.NestedEnum" => match name {
+            "FOO" => Some(0),
+            "BAR" => Some(1),
+            "BAZ" => Some(2),
+            _ => None,
+        },
+        "google.protobuf.NullValue" => match name {
+            "NULL_VALUE" => Some(0),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -287,12 +283,20 @@ impl ConformanceRunner {
                 if type_name.contains("Enum") || type_name == "google.protobuf.NullValue" {
                     // Create factory function to generate enum constructors
                     let type_name_clone = type_name.clone();
-                    let create_enum_constructor = move |_ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
+                    let create_enum_constructor = move |_ftx: &cel::FunctionContext,
+                                                        value: cel::objects::Value|
+                          -> Result<
+                        cel::objects::Value,
+                        cel::ExecutionError,
+                    > {
                         match &value {
                             cel::objects::Value::String(name) => {
                                 // Convert enum name to integer value
-                                let enum_value = get_enum_value_by_name(&type_name_clone, name.as_str())
-                                    .ok_or_else(|| cel::ExecutionError::function_error("enum", "invalid"))?;
+                                let enum_value =
+                                    get_enum_value_by_name(&type_name_clone, name.as_str())
+                                        .ok_or_else(|| {
+                                            cel::ExecutionError::function_error("enum", "invalid")
+                                        })?;
                                 Ok(cel::objects::Value::Int(enum_value))
                             }
                             _ => {
@@ -311,14 +315,24 @@ impl ConformanceRunner {
                     if type_name.contains("TestAllTypes.NestedEnum") {
                         // Also register with parent prefix
                         let type_name_clone2 = type_name.clone();
-                        let create_enum_constructor2 = move |_ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
+                        let create_enum_constructor2 = move |_ftx: &cel::FunctionContext,
+                                                             value: cel::objects::Value|
+                              -> Result<
+                            cel::objects::Value,
+                            cel::ExecutionError,
+                        > {
                             match &value {
                                 cel::objects::Value::String(name) => {
-                                    let enum_value = get_enum_value_by_name(&type_name_clone2, name.as_str())
-                                        .ok_or_else(|| cel::ExecutionError::function_error("enum", "invalid"))?;
+                                    let enum_value =
+                                        get_enum_value_by_name(&type_name_clone2, name.as_str())
+                                            .ok_or_else(|| {
+                                                cel::ExecutionError::function_error(
+                                                    "enum", "invalid",
+                                                )
+                                            })?;
                                     Ok(cel::objects::Value::Int(enum_value))
                                 }
-                                _ => Ok(value)
+                                _ => Ok(value),
                             }
                         };
                         context.add_function("TestAllTypes.NestedEnum", create_enum_constructor2);
@@ -346,9 +360,12 @@ impl ConformanceRunner {
                             }),
                         );
 
-                        context.add_variable("TestAllTypes", cel::objects::Value::Map(cel::objects::Map {
-                            map: Arc::new(test_all_types_fields),
-                        }));
+                        context.add_variable(
+                            "TestAllTypes",
+                            cel::objects::Value::Map(cel::objects::Map {
+                                map: Arc::new(test_all_types_fields),
+                            }),
+                        );
                     }
 
                     // For GlobalEnum - register as a map with enum values
@@ -367,9 +384,12 @@ impl ConformanceRunner {
                             cel::objects::Value::Int(2),
                         );
 
-                        context.add_variable("GlobalEnum", cel::objects::Value::Map(cel::objects::Map {
-                            map: Arc::new(global_enum_map),
-                        }));
+                        context.add_variable(
+                            "GlobalEnum",
+                            cel::objects::Value::Map(cel::objects::Map {
+                                map: Arc::new(global_enum_map),
+                            }),
+                        );
                     }
 
                     // For NullValue - register as a map with NULL_VALUE
@@ -380,9 +400,12 @@ impl ConformanceRunner {
                             cel::objects::Value::Int(0),
                         );
 
-                        context.add_variable("NullValue", cel::objects::Value::Map(cel::objects::Map {
-                            map: Arc::new(null_value_map),
-                        }));
+                        context.add_variable(
+                            "NullValue",
+                            cel::objects::Value::Map(cel::objects::Map {
+                                map: Arc::new(null_value_map),
+                            }),
+                        );
                     }
                 }
             }
@@ -433,7 +456,8 @@ impl ConformanceRunner {
                         Ok(actual_value) => {
                             // Unwrap wrapper types before comparison
                             let actual_unwrapped = unwrap_wrapper_if_needed(actual_value.clone());
-                            let expected_unwrapped = unwrap_wrapper_if_needed(expected_cel_value.clone());
+                            let expected_unwrapped =
+                                unwrap_wrapper_if_needed(expected_cel_value.clone());
 
                             if values_equal(&actual_unwrapped, &expected_unwrapped) {
                                 TestResult::Passed {
@@ -672,7 +696,9 @@ fn unwrap_wrapper_if_needed(value: CelValue) -> CelValue {
             match type_name {
                 "google.protobuf.Int32Value" | "google.protobuf.Int64Value" => CelValue::Int(0),
                 "google.protobuf.UInt32Value" | "google.protobuf.UInt64Value" => CelValue::UInt(0),
-                "google.protobuf.FloatValue" | "google.protobuf.DoubleValue" => CelValue::Float(0.0),
+                "google.protobuf.FloatValue" | "google.protobuf.DoubleValue" => {
+                    CelValue::Float(0.0)
+                }
                 "google.protobuf.StringValue" => CelValue::String(Arc::new(String::new())),
                 "google.protobuf.BytesValue" => CelValue::Bytes(Arc::new(Vec::new())),
                 "google.protobuf.BoolValue" => CelValue::Bool(false),
@@ -762,10 +788,7 @@ impl TestResults {
 
         for failure in &self.failed {
             let category = categorize_test(&failure.0, &failure.1);
-            category_groups
-                .entry(category)
-                .or_default()
-                .push(failure);
+            category_groups.entry(category).or_default().push(failure);
         }
 
         // Sort categories by count (descending)
