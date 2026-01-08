@@ -171,14 +171,67 @@ pub fn bytes(value: Arc<String>) -> Result<Value> {
 // Performs a type conversion on the target.
 pub fn double(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     Ok(match this {
-        Value::String(v) => v
-            .parse::<f64>()
-            .map(Value::Float)
-            .map_err(|e| ftx.error(format!("string parse error: {e}")))?,
+        Value::String(v) => {
+            let parsed = v
+                .parse::<f64>()
+                .map_err(|e| ftx.error(format!("string parse error: {e}")))?;
+
+            // Handle special string values
+            if v.eq_ignore_ascii_case("nan") {
+                Value::Float(f64::NAN)
+            } else if v.eq_ignore_ascii_case("inf") || v.eq_ignore_ascii_case("infinity") || v.as_str() == "+inf" {
+                Value::Float(f64::INFINITY)
+            } else if v.eq_ignore_ascii_case("-inf") || v.eq_ignore_ascii_case("-infinity") {
+                Value::Float(f64::NEG_INFINITY)
+            } else {
+                Value::Float(parsed)
+            }
+        }
         Value::Float(v) => Value::Float(v),
         Value::Int(v) => Value::Float(v as f64),
         Value::UInt(v) => Value::Float(v as f64),
         v => return Err(ftx.error(format!("cannot convert {v:?} to double"))),
+    })
+}
+
+// Performs a type conversion on the target, respecting f32 precision and range.
+pub fn float(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::String(v) => {
+            // Parse as f64 first to handle special values and range
+            let parsed_f64 = v
+                .parse::<f64>()
+                .map_err(|e| ftx.error(format!("string parse error: {e}")))?;
+
+            // Handle special string values
+            let value_f64 = if v.eq_ignore_ascii_case("nan") {
+                f64::NAN
+            } else if v.eq_ignore_ascii_case("inf") || v.eq_ignore_ascii_case("infinity") || v.as_str() == "+inf" {
+                f64::INFINITY
+            } else if v.eq_ignore_ascii_case("-inf") || v.eq_ignore_ascii_case("-infinity") {
+                f64::NEG_INFINITY
+            } else {
+                parsed_f64
+            };
+
+            // Convert to f32 and back to f64 to apply f32 precision and range rules
+            let as_f32 = value_f64 as f32;
+            Value::Float(as_f32 as f64)
+        }
+        Value::Float(v) => {
+            // Apply f32 precision and range rules
+            let as_f32 = v as f32;
+            Value::Float(as_f32 as f64)
+        }
+        Value::Int(v) => {
+            let as_f32 = v as f32;
+            Value::Float(as_f32 as f64)
+        }
+        Value::UInt(v) => {
+            let as_f32 = v as f32;
+            Value::Float(as_f32 as f64)
+        }
+        v => return Err(ftx.error(format!("cannot convert {v:?} to float"))),
     })
 }
 
@@ -878,6 +931,23 @@ mod tests {
             ("string", "'10'.double() == 10.0"),
             ("int", "10.double() == 10.0"),
             ("double", "10.0.double() == 10.0"),
+            ("nan", "double('NaN').string() == 'NaN'"),
+            ("inf", "double('inf') == double('inf')"),
+            ("-inf", "double('-inf') < 0.0"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_float() {
+        [
+            ("string", "'10'.float() == 10.0"),
+            ("int", "10.float() == 10.0"),
+            ("double", "10.0.float() == 10.0"),
+            ("nan", "float('NaN').string() == 'NaN'"),
+            ("inf", "float('inf') == float('inf')"),
+            ("-inf", "float('-inf') < 0.0"),
         ]
         .iter()
         .for_each(assert_script);

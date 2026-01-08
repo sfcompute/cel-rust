@@ -189,6 +189,7 @@ impl Default for Context<'_> {
         ctx.add_function("string", functions::string);
         ctx.add_function("bytes", functions::bytes);
         ctx.add_function("double", functions::double);
+        ctx.add_function("float", functions::float);
         ctx.add_function("int", functions::int);
         ctx.add_function("uint", functions::uint);
         ctx.add_function("optional.none", functions::optional_none);
