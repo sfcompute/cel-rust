@@ -302,6 +302,21 @@ impl ConformanceRunner {
                         }
                     };
 
+                    // Register with both fully qualified name and short name
+                    // The fully qualified name allows qualified identifier resolution to work
+                    let type_name_clone2 = type_name.clone();
+                    let create_enum_constructor2 = move |_ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
+                        match &value {
+                            cel::objects::Value::String(name) => {
+                                let enum_value = get_enum_value_by_name(&type_name_clone2, name.as_str())
+                                    .ok_or_else(|| cel::ExecutionError::function_error("enum", "invalid"))?;
+                                Ok(cel::objects::Value::Int(enum_value))
+                            }
+                            _ => Ok(value)
+                        }
+                    };
+                    context.add_function(&type_name, create_enum_constructor2);
+
                     // Extract short name (e.g., "GlobalEnum" from "cel.expr.conformance.proto2.GlobalEnum")
                     if let Some(short_name) = type_name.rsplit('.').next() {
                         context.add_function(short_name, create_enum_constructor);
@@ -310,18 +325,18 @@ impl ConformanceRunner {
                     // For TestAllTypes.NestedEnum
                     if type_name.contains("TestAllTypes.NestedEnum") {
                         // Also register with parent prefix
-                        let type_name_clone2 = type_name.clone();
-                        let create_enum_constructor2 = move |_ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
+                        let type_name_clone3 = type_name.clone();
+                        let create_enum_constructor3 = move |_ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
                             match &value {
                                 cel::objects::Value::String(name) => {
-                                    let enum_value = get_enum_value_by_name(&type_name_clone2, name.as_str())
+                                    let enum_value = get_enum_value_by_name(&type_name_clone3, name.as_str())
                                         .ok_or_else(|| cel::ExecutionError::function_error("enum", "invalid"))?;
                                     Ok(cel::objects::Value::Int(enum_value))
                                 }
                                 _ => Ok(value)
                             }
                         };
-                        context.add_function("TestAllTypes.NestedEnum", create_enum_constructor2);
+                        context.add_function("TestAllTypes.NestedEnum", create_enum_constructor3);
 
                         // Also register TestAllTypes as a map with NestedEnum field
                         let mut nested_enum_map = std::collections::HashMap::new();
@@ -342,13 +357,21 @@ impl ConformanceRunner {
                         test_all_types_fields.insert(
                             cel::objects::Key::String(Arc::new("NestedEnum".to_string())),
                             cel::objects::Value::Map(cel::objects::Map {
-                                map: Arc::new(nested_enum_map),
+                                map: Arc::new(nested_enum_map.clone()),
                             }),
                         );
 
-                        context.add_variable("TestAllTypes", cel::objects::Value::Map(cel::objects::Map {
+                        let test_all_types_value = cel::objects::Value::Map(cel::objects::Map {
                             map: Arc::new(test_all_types_fields),
-                        }));
+                        });
+
+                        // Register with both short and fully qualified names
+                        context.add_variable("TestAllTypes", test_all_types_value.clone());
+
+                        // Register the fully qualified TestAllTypes name
+                        if let Some(test_all_types_fqn) = type_name.rsplit_once('.') {
+                            context.add_variable(test_all_types_fqn.0, test_all_types_value);
+                        }
                     }
 
                     // For GlobalEnum - register as a map with enum values
@@ -367,9 +390,13 @@ impl ConformanceRunner {
                             cel::objects::Value::Int(2),
                         );
 
-                        context.add_variable("GlobalEnum", cel::objects::Value::Map(cel::objects::Map {
+                        let global_enum_value = cel::objects::Value::Map(cel::objects::Map {
                             map: Arc::new(global_enum_map),
-                        }));
+                        });
+
+                        // Register with both short and fully qualified names
+                        context.add_variable("GlobalEnum", global_enum_value.clone());
+                        context.add_variable(&type_name, global_enum_value);
                     }
 
                     // For NullValue - register as a map with NULL_VALUE
@@ -380,9 +407,13 @@ impl ConformanceRunner {
                             cel::objects::Value::Int(0),
                         );
 
-                        context.add_variable("NullValue", cel::objects::Value::Map(cel::objects::Map {
+                        let null_value_value = cel::objects::Value::Map(cel::objects::Map {
                             map: Arc::new(null_value_map),
-                        }));
+                        });
+
+                        // Register with both short and fully qualified names
+                        context.add_variable("NullValue", null_value_value.clone());
+                        context.add_variable(&type_name, null_value_value);
                     }
                 }
             }
