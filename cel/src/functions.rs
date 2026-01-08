@@ -369,6 +369,62 @@ pub mod time {
             .map_err(|e| ExecutionError::function_error("timestamp", e.to_string()))
     }
 
+    /// Parse a timezone string and convert a timestamp to that timezone.
+    /// Supports fixed offset format like "+05:30" or "-08:00", or "UTC"/"Z".
+    fn parse_timezone<Tz: chrono::TimeZone>(
+        tz_str: &str,
+        dt: chrono::DateTime<Tz>,
+    ) -> Option<chrono::DateTime<chrono::FixedOffset>>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        // Handle UTC special case
+        if tz_str == "UTC" || tz_str == "Z" {
+            return Some(dt.with_timezone(&chrono::Utc).fixed_offset());
+        }
+
+        // Try to parse as fixed offset (e.g., "+05:30", "-08:00")
+        if let Some(offset) = parse_fixed_offset(tz_str) {
+            return Some(dt.with_timezone(&offset));
+        }
+
+        None
+    }
+
+    /// Parse a fixed offset timezone string like "+05:30" or "-08:00"
+    fn parse_fixed_offset(tz_str: &str) -> Option<chrono::FixedOffset> {
+        if tz_str.len() < 3 {
+            return None;
+        }
+
+        let sign = match tz_str.chars().next()? {
+            '+' => 1,
+            '-' => -1,
+            _ => return None,
+        };
+
+        let rest = &tz_str[1..];
+        let parts: Vec<&str> = rest.split(':').collect();
+
+        let (hours, minutes) = match parts.len() {
+            1 => {
+                // Format: "+05" or "-08"
+                let h = parts[0].parse::<i32>().ok()?;
+                (h, 0)
+            }
+            2 => {
+                // Format: "+05:30" or "-08:00"
+                let h = parts[0].parse::<i32>().ok()?;
+                let m = parts[1].parse::<i32>().ok()?;
+                (h, m)
+            }
+            _ => return None,
+        };
+
+        let total_seconds = sign * (hours * 3600 + minutes * 60);
+        chrono::FixedOffset::east_opt(total_seconds)
+    }
+
     pub fn timestamp_year(
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
@@ -393,15 +449,39 @@ pub mod time {
     }
 
     pub fn timestamp_month_day(
+        ftx: &crate::FunctionContext,
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
-        Ok((this.day0() as i32).into())
+        let dt = if ftx.args.is_empty() {
+            this.with_timezone(&chrono::Utc).fixed_offset()
+        } else {
+            let tz_str = ftx.resolve(ftx.args[0].clone())?;
+            let tz_str = match tz_str {
+                Value::String(s) => s,
+                _ => return Err(ftx.error("timezone must be a string")),
+            };
+            parse_timezone(&tz_str, this)
+                .ok_or_else(|| ftx.error(format!("invalid timezone: {}", tz_str)))?
+        };
+        Ok((dt.day0() as i32).into())
     }
 
     pub fn timestamp_date(
+        ftx: &crate::FunctionContext,
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
-        Ok((this.day() as i32).into())
+        let dt = if ftx.args.is_empty() {
+            this.with_timezone(&chrono::Utc).fixed_offset()
+        } else {
+            let tz_str = ftx.resolve(ftx.args[0].clone())?;
+            let tz_str = match tz_str {
+                Value::String(s) => s,
+                _ => return Err(ftx.error("timezone must be a string")),
+            };
+            parse_timezone(&tz_str, this)
+                .ok_or_else(|| ftx.error(format!("invalid timezone: {}", tz_str)))?
+        };
+        Ok((dt.day() as i32).into())
     }
 
     pub fn timestamp_weekday(
@@ -411,15 +491,39 @@ pub mod time {
     }
 
     pub fn timestamp_hours(
+        ftx: &crate::FunctionContext,
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
-        Ok((this.hour() as i32).into())
+        let dt = if ftx.args.is_empty() {
+            this.with_timezone(&chrono::Utc).fixed_offset()
+        } else {
+            let tz_str = ftx.resolve(ftx.args[0].clone())?;
+            let tz_str = match tz_str {
+                Value::String(s) => s,
+                _ => return Err(ftx.error("timezone must be a string")),
+            };
+            parse_timezone(&tz_str, this)
+                .ok_or_else(|| ftx.error(format!("invalid timezone: {}", tz_str)))?
+        };
+        Ok((dt.hour() as i32).into())
     }
 
     pub fn timestamp_minutes(
+        ftx: &crate::FunctionContext,
         This(this): This<chrono::DateTime<chrono::FixedOffset>>,
     ) -> Result<Value> {
-        Ok((this.minute() as i32).into())
+        let dt = if ftx.args.is_empty() {
+            this.with_timezone(&chrono::Utc).fixed_offset()
+        } else {
+            let tz_str = ftx.resolve(ftx.args[0].clone())?;
+            let tz_str = match tz_str {
+                Value::String(s) => s,
+                _ => return Err(ftx.error("timezone must be a string")),
+            };
+            parse_timezone(&tz_str, this)
+                .ok_or_else(|| ftx.error(format!("invalid timezone: {}", tz_str)))?
+        };
+        Ok((dt.minute() as i32).into())
     }
 
     pub fn timestamp_seconds(
@@ -714,6 +818,22 @@ mod tests {
             (
                 "timestamp getMilliseconds",
                 "timestamp('2023-05-28T00:00:42.123Z').getMilliseconds() == 123",
+            ),
+            (
+                "timestamp getDate with timezone",
+                "timestamp('2023-05-28T23:00:00Z').getDate('+01:00') == 29",
+            ),
+            (
+                "timestamp getDayOfMonth with timezone",
+                "timestamp('2023-05-28T23:00:00Z').getDayOfMonth('+01:00') == 28",
+            ),
+            (
+                "timestamp getHours with timezone",
+                "timestamp('2023-05-28T23:00:00Z').getHours('+01:00') == 0",
+            ),
+            (
+                "timestamp getMinutes with timezone",
+                "timestamp('2023-05-28T23:45:00Z').getMinutes('+01:00') == 45",
             ),
         ]
         .iter()
