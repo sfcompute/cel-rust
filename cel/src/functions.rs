@@ -159,7 +159,11 @@ pub fn string(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         Value::Int(v) => Value::String(v.to_string().into()),
         Value::UInt(v) => Value::String(v.to_string().into()),
         Value::Float(v) => Value::String(v.to_string().into()),
-        Value::Bytes(v) => Value::String(Arc::new(String::from_utf8_lossy(v.as_slice()).into())),
+        Value::Bytes(v) => {
+            let s = String::from_utf8(v.as_ref().clone())
+                .map_err(|_| ftx.error("invalid UTF-8"))?;
+            Value::String(Arc::new(s))
+        }
         v => return Err(ftx.error(format!("cannot convert {v:?} to string"))),
     })
 }
