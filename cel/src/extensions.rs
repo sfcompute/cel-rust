@@ -1,6 +1,5 @@
 use crate::objects::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// ExtensionDescriptor describes a protocol buffer extension field.
 #[derive(Clone, Debug)]
@@ -60,12 +59,15 @@ impl ExtensionRegistry {
         }
 
         // Try matching by extension name across all message types
-        for ((stored_type, stored_ext), values) in &self.extension_values {
-            if stored_ext == ext_name {
-                // Check if the extension is registered for this message type
-                if let Some(descriptor) = self.extensions.get(ext_name) {
-                    if &descriptor.extendee == message_type || stored_type == message_type {
-                        return values.get(ext_name);
+        for (key, values) in &self.extension_values {
+            // Parse the key format "message_type_name:extension_name"
+            if let Some((stored_type, stored_ext)) = key.split_once(':') {
+                if stored_ext == ext_name {
+                    // Check if the extension is registered for this message type
+                    if let Some(descriptor) = self.extensions.get(ext_name) {
+                        if &descriptor.extendee == message_type || stored_type == message_type {
+                            return values.get(ext_name);
+                        }
                     }
                 }
             }
@@ -107,6 +109,7 @@ impl ExtensionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_extension_registry() {

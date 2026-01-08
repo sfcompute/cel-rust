@@ -1046,7 +1046,7 @@ impl Value {
                     }
                 } else {
                     // Try regular member access first
-                    match left.member(&select.field) {
+                    match left.clone().member(&select.field) {
                         Ok(value) => Ok(value),
                         Err(_) => {
                             // If regular access fails, try extension lookup
@@ -1738,7 +1738,7 @@ mod tests {
 
     #[test]
     fn test_extension_field_access() {
-        use crate::extensions::{ExtensionDescriptor, ExtensionRegistry};
+        use crate::extensions::ExtensionDescriptor;
 
         let mut ctx = Context::default();
 

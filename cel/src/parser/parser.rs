@@ -762,6 +762,7 @@ impl gen::CELVisitorCompat<'_> for Parser {
                     operand: Box::new(operand),
                     field,
                     test: false,
+                    is_extension: false,
                 }),
             )
         } else {
