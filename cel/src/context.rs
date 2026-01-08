@@ -228,6 +228,11 @@ impl Default for Context<'_> {
         ctx.add_function("float", functions::float);
         ctx.add_function("int", functions::int);
         ctx.add_function("uint", functions::uint);
+        ctx.add_function("quote", functions::quote);
+        ctx.add_function("replace", functions::replace);
+        ctx.add_function("split", functions::split);
+        ctx.add_function("substring", functions::substring);
+        ctx.add_function("trim", functions::trim);
         ctx.add_function("optional.none", functions::optional_none);
         ctx.add_function("optional.of", functions::optional_of);
         ctx.add_function(

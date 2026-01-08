@@ -77,7 +77,7 @@ pub fn size(ftx: &FunctionContext, This(this): This<Value>) -> Result<i64> {
     let size = match this {
         Value::List(l) => l.len(),
         Value::Map(m) => m.map.len(),
-        Value::String(s) => s.len(),
+        Value::String(s) => s.chars().count(), // Count Unicode characters, not bytes
         Value::Bytes(b) => b.len(),
         value => return Err(ftx.error(format!("cannot determine the size of {value:?}"))),
     };
@@ -392,6 +392,105 @@ pub fn matches(
         Ok(re) => Ok(re.is_match(&this)),
         Err(err) => Err(ftx.error(format!("'{regex}' not a valid regex:\n{err}"))),
     }
+}
+
+/// Returns a quoted/escaped version of a string suitable for use in CEL expressions.
+/// Wraps the string in double quotes and escapes special characters.
+///
+/// # Example
+/// ```cel
+/// quote("hello") == "\"hello\""
+/// ```
+pub fn quote(This(this): This<Arc<String>>) -> Arc<String> {
+    let escaped = this
+        .chars()
+        .flat_map(|c| match c {
+            '"' => vec!['\\', '"'],
+            '\\' => vec!['\\', '\\'],
+            '\n' => vec!['\\', 'n'],
+            '\r' => vec!['\\', 'r'],
+            '\t' => vec!['\\', 't'],
+            c => vec![c],
+        })
+        .collect::<String>();
+    Arc::new(format!("\"{}\"", escaped))
+}
+
+/// Replaces all occurrences of a substring with another substring.
+///
+/// # Example
+/// ```cel
+/// "hello world".replace("world", "CEL") == "hello CEL"
+/// ```
+pub fn replace(
+    This(this): This<Arc<String>>,
+    old: Arc<String>,
+    new: Arc<String>,
+) -> Arc<String> {
+    Arc::new(this.replace(old.as_str(), new.as_str()))
+}
+
+/// Splits a string by a separator and returns a list of substrings.
+///
+/// # Example
+/// ```cel
+/// "a,b,c".split(",") == ["a", "b", "c"]
+/// ```
+pub fn split(This(this): This<Arc<String>>, separator: Arc<String>) -> Arc<Vec<Value>> {
+    let parts: Vec<Value> = this
+        .split(separator.as_str())
+        .map(|s| Value::String(Arc::new(s.to_string())))
+        .collect();
+    Arc::new(parts)
+}
+
+/// Extracts a substring from a string. Uses Unicode character indices.
+/// Takes a start index and an end index (exclusive).
+///
+/// # Example
+/// ```cel
+/// "hello".substring(1, 4) == "ell"
+/// ```
+pub fn substring(
+    ftx: &FunctionContext,
+    This(this): This<Arc<String>>,
+    start: i64,
+    end: i64,
+) -> Result<Arc<String>> {
+    let chars: Vec<char> = this.chars().collect();
+    let len = chars.len() as i64;
+
+    // Convert start to usize
+    let start_idx: usize = if start < 0 {
+        return Err(ftx.error(format!("start index cannot be negative: {}", start)));
+    } else if start > len {
+        return Err(ftx.error(format!("start index {} out of bounds for string of length {}", start, len)));
+    } else {
+        start as usize
+    };
+
+    // Convert end to usize
+    let end_idx: usize = if end < 0 {
+        return Err(ftx.error(format!("end index cannot be negative: {}", end)));
+    } else if end > len {
+        return Err(ftx.error(format!("end index {} out of bounds for string of length {}", end, len)));
+    } else if end < start {
+        return Err(ftx.error(format!("end index {} cannot be less than start index {}", end, start)));
+    } else {
+        end as usize
+    };
+
+    Ok(Arc::new(chars[start_idx..end_idx].iter().collect()))
+}
+
+/// Removes leading and trailing whitespace from a string.
+///
+/// # Example
+/// ```cel
+/// "  hello  ".trim() == "hello"
+/// ```
+pub fn trim(This(this): This<Arc<String>>) -> Arc<String> {
+    Arc::new(this.trim().to_string())
 }
 
 #[cfg(feature = "chrono")]
@@ -1085,6 +1184,79 @@ mod tests {
                 }
             )
         );
+    }
+
+    #[test]
+    fn test_quote() {
+        [
+            ("simple string", r#"'hello'.quote() == '"hello"'"#),
+            ("string with quotes", r#"'say "hi"'.quote() == '"say \\"hi\\""'"#),
+            ("empty string", r#"''.quote() == '""'"#),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_replace() {
+        [
+            ("basic replace", "'hello world'.replace('world', 'CEL') == 'hello CEL'"),
+            ("replace multiple", "'hello'.replace('l', 'L') == 'heLLo'"),
+            ("replace none", "'hello'.replace('x', 'y') == 'hello'"),
+            ("replace empty", "'hello'.replace('', 'x') == 'xhxexlxlxox'"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_split() {
+        [
+            ("basic split", "'a,b,c'.split(',') == ['a', 'b', 'c']"),
+            ("split spaces", "'hello world'.split(' ') == ['hello', 'world']"),
+            ("split none", "'hello'.split(',') == ['hello']"),
+            ("split empty sep", "'abc'.split('') == ['', 'a', 'b', 'c', '']"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_substring() {
+        [
+            ("basic substring", "'hello'.substring(1, 4) == 'ell'"),
+            ("substring from start", "'hello'.substring(0, 3) == 'hel'"),
+            ("substring to end", "'hello'.substring(2, 5) == 'llo'"),
+            ("empty substring", "'hello'.substring(2, 2) == ''"),
+            ("unicode substring", "'café☕'.substring(0, 4) == 'café'"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_trim() {
+        [
+            ("basic trim", "'  hello  '.trim() == 'hello'"),
+            ("trim left", "'  hello'.trim() == 'hello'"),
+            ("trim right", "'hello  '.trim() == 'hello'"),
+            ("no trim needed", "'hello'.trim() == 'hello'"),
+            ("trim tabs and newlines", "'\\t\\nhello\\n\\t'.trim() == 'hello'"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_size_unicode() {
+        [
+            ("ascii string", "'hello'.size() == 5"),
+            ("unicode string", "'café'.size() == 4"),
+            ("emoji", "'hello😀'.size() == 6"),
+            ("mixed unicode", "'café☕'.size() == 5"),
+        ]
+        .iter()
+        .for_each(assert_script);
     }
 
     #[test]
