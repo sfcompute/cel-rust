@@ -1053,20 +1053,30 @@ impl Value {
                 match iter {
                     Value::List(items) => {
                         for item in items.deref() {
-                            if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                            // Check loop condition first - short-circuit if false
+                            let cond_result = Value::resolve(&comprehension.loop_cond, &ctx)?;
+                            if !cond_result.to_bool()? {
                                 break;
                             }
+
                             ctx.add_variable_from_value(&comprehension.iter_var, item.clone());
+
+                            // Evaluate loop step - errors will propagate immediately via ?
                             let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
                             ctx.add_variable_from_value(&comprehension.accu_var, accu);
                         }
                     }
                     Value::Map(map) => {
                         for key in map.map.deref().keys() {
-                            if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
+                            // Check loop condition first - short-circuit if false
+                            let cond_result = Value::resolve(&comprehension.loop_cond, &ctx)?;
+                            if !cond_result.to_bool()? {
                                 break;
                             }
+
                             ctx.add_variable_from_value(&comprehension.iter_var, key.clone());
+
+                            // Evaluate loop step - errors will propagate immediately via ?
                             let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
                             ctx.add_variable_from_value(&comprehension.accu_var, accu);
                         }
