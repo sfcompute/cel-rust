@@ -14,7 +14,7 @@ pub use common::ast::IdedExpr;
 use common::ast::SelectExpr;
 pub use context::Context;
 pub use functions::FunctionContext;
-pub use objects::{ResolveResult, Value};
+pub use objects::{EnumType, ResolveResult, Value};
 use parser::{Expression, ExpressionReferences, Parser};
 pub use parser::{ParseError, ParseErrors};
 pub mod functions;
