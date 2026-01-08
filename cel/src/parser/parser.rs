@@ -707,8 +707,9 @@ impl gen::CELVisitorCompat<'_> for Parser {
                 IdedExpr::default()
             }
             Some(member) => {
+                // Even number of negations cancel out
                 if ctx.ops.len() % 2 == 0 {
-                    self.visit(member.as_ref());
+                    return self.visit(member.as_ref());
                 }
                 let op_id = self.helper.next_id(&ctx.ops[0]);
                 let target = self.visit(member.as_ref());
@@ -723,8 +724,9 @@ impl gen::CELVisitorCompat<'_> for Parser {
                 self.report_error::<ParseError, _>(&ctx.start(), None, "No `MemberContextAll`!")
             }
             Some(member) => {
+                // Even number of negations cancel out
                 if ctx.ops.len() % 2 == 0 {
-                    self.visit(member.as_ref());
+                    return self.visit(member.as_ref());
                 }
                 let op_id = self.helper.next_id(&ctx.ops[0]);
                 let target = self.visit(member.as_ref());
@@ -1056,7 +1058,48 @@ impl gen::CELVisitorCompat<'_> for Parser {
     fn visit_Bytes(&mut self, ctx: &BytesContext<'_>) -> Self::Return {
         if let Some(token) = ctx.tok.as_deref() {
             let string = ctx.get_text();
-            match parse::parse_bytes(&string[2..string.len() - 1]) {
+
+            // Check if this is a raw bytes literal (br"...", bR"...", Br"...", or BR"...")
+            let is_raw = string.len() >= 3 && {
+                let first_two = &string[0..2];
+                first_two == "br" || first_two == "bR" || first_two == "Br" || first_two == "BR"
+            };
+
+            let result = if is_raw {
+                // Raw bytes: strip prefix (br/bR/Br/BR + quote) and trailing quote, no escape processing
+                let start = if string.starts_with("br\"\"\"") || string.starts_with("bR\"\"\"") ||
+                               string.starts_with("Br\"\"\"") || string.starts_with("BR\"\"\"") ||
+                               string.starts_with("br'''") || string.starts_with("bR'''") ||
+                               string.starts_with("Br'''") || string.starts_with("BR'''") {
+                    5  // br""" or br'''
+                } else {
+                    3  // br" or br'
+                };
+                let end = if string.ends_with("\"\"\"") || string.ends_with("'''") {
+                    3
+                } else {
+                    1
+                };
+                let content = &string[start..string.len() - end];
+                // For raw bytes, just convert the string directly to bytes (no escape processing)
+                Ok(content.as_bytes().to_vec())
+            } else {
+                // Regular bytes: strip prefix (b/B + quote) and trailing quote, process escapes
+                let start = if string.starts_with("b\"\"\"") || string.starts_with("B\"\"\"") ||
+                               string.starts_with("b'''") || string.starts_with("B'''") {
+                    4  // b"""
+                } else {
+                    2  // b"
+                };
+                let end = if string.ends_with("\"\"\"") || string.ends_with("'''") {
+                    3
+                } else {
+                    1
+                };
+                parse::parse_bytes(&string[start..string.len() - end])
+            };
+
+            match result {
                 Ok(bytes) => self
                     .helper
                     .next_expr(token, Expr::Literal(CelVal::Bytes(bytes))),
@@ -2289,6 +2332,16 @@ ERROR: <input>:1:24: unsupported syntax '?'
                     self.dec_indent();
                     self.push("}");
                     &format!("^#{}:{}#", expr.id, "*expr.Expr_StructExpr")
+                }
+                Expr::Bind(bind) => {
+                    self.push("cel.bind(");
+                    self.push(&bind.var);
+                    self.push(", ");
+                    self.buffer(&bind.init);
+                    self.push(", ");
+                    self.buffer(&bind.result);
+                    self.push(")");
+                    &format!("^#{}:{}#", expr.id, "*expr.Expr_BindExpr")
                 }
             };
             self.push(e);

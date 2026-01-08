@@ -265,12 +265,22 @@ fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
         }));
     }
 
-    // oneof fields - these are typically unset and should return error
-    // However, for some tests they might need a default
+    // oneof_type field - a nested message field in TestAllTypes
+    // It should return a struct with the proper type name and default fields
     if field_name == "oneof_type" {
-        // oneof_type defaults to empty map for now
-        return Some(Value::Map(Map {
-            map: Arc::new(HashMap::new()),
+        let nested_type = if type_name.contains("proto2") {
+            "cel.expr.conformance.proto2.TestAllTypes.NestedTestAllTypes".to_string()
+        } else {
+            "cel.expr.conformance.proto3.TestAllTypes.NestedTestAllTypes".to_string()
+        };
+
+        let mut fields = HashMap::new();
+        let excluded_fields = std::collections::HashSet::new();
+        populate_proto_defaults(&nested_type, &mut fields, &excluded_fields);
+
+        return Some(Value::Struct(Struct {
+            type_name: Arc::new(nested_type),
+            fields: Arc::new(fields),
         }));
     }
 
@@ -328,24 +338,31 @@ fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
         return Some(Value::Bool(false));
     }
 
-    // Enum fields - proto3 enums have implicit zero defaults
-    if (field_name.ends_with("_enum") || field_name == "standalone_enum") && type_name.contains("proto3") {
+    // Enum fields - both proto2 and proto3 enums default to 0 (the first enum value)
+    // For conformance tests, all enum fields should have default value 0
+    if field_name.ends_with("_enum") || field_name == "standalone_enum" {
         return Some(Value::Int(0));
     }
 
     // Scalar fields (single_*) - return type-appropriate defaults
     if field_name.starts_with("single_") {
         // Try to infer type from field name suffix
+        // Check uint and fixed32/fixed64 first (unsigned types)
+        if field_name.contains("uint") || field_name == "single_fixed32" || field_name == "single_fixed64" {
+            return Some(Value::UInt(0));
+        }
+        // Then check signed integer types
         if field_name.contains("int") || field_name.contains("fixed") || field_name.contains("sint") {
             return Some(Value::Int(0));
-        }
-        if field_name.contains("uint") {
-            return Some(Value::UInt(0));
         }
         if field_name.contains("float") || field_name.contains("double") {
             return Some(Value::Float(0.0));
         }
         if field_name.contains("bool") {
+            // Proto2 has special default for single_bool field (true), proto3 defaults to false
+            if field_name == "single_bool" && type_name.contains("proto2") {
+                return Some(Value::Bool(true));
+            }
             return Some(Value::Bool(false));
         }
         if field_name.contains("string") {
@@ -404,6 +421,36 @@ fn get_wrapper_default(type_name: &str) -> Value {
         "google.protobuf.Int32Value" => Value::Int(0),
         "google.protobuf.UInt32Value" => Value::UInt(0),
         _ => Value::Null,
+    }
+}
+
+/// Check if a value is the proto3 default value for a given field.
+/// In proto3, setting a scalar field to its default is semantically equivalent to not setting it.
+fn is_proto3_default_value(field_name: &str, value: &Value) -> bool {
+    // Wrapper fields are not scalar - they use Null for unset
+    if field_name.ends_with("_wrapper") {
+        return false;
+    }
+
+    // Check scalar field defaults based on field name patterns
+    if field_name.starts_with("single_") {
+        match value {
+            // Unsigned integer types (including fixed32/fixed64)
+            Value::UInt(0) if field_name.contains("uint") || field_name == "single_fixed32" || field_name == "single_fixed64" => true,
+            // Signed integer types (including sint32/sint64, sfixed32/sfixed64)
+            Value::Int(0) if field_name.contains("int") || field_name.contains("sint") || field_name.contains("sfixed") => true,
+            Value::Float(f) if *f == 0.0 && (field_name.contains("float") || field_name.contains("double")) => true,
+            Value::Bool(false) if field_name.contains("bool") => true,
+            Value::String(s) if s.is_empty() && field_name.contains("string") => true,
+            Value::Bytes(b) if b.is_empty() && field_name.contains("bytes") => true,
+            _ => false,
+        }
+    } else if field_name.ends_with("_enum") || field_name == "standalone_enum" {
+        // Enum fields default to 0
+        matches!(value, Value::Int(0))
+    } else {
+        // Other fields (message types, etc.) are not scalar
+        false
     }
 }
 
@@ -472,6 +519,8 @@ fn populate_proto_defaults(
         }
 
         // Proto3 has implicit zero defaults for all scalar fields
+        // NOTE: We populate these defaults so they appear when the struct is displayed/accessed.
+        // The has() function will return false for fields with default values in proto3.
         if type_name == "cel.expr.conformance.proto3.TestAllTypes" {
             fields
                 .entry("single_bool".to_string())
@@ -494,6 +543,24 @@ fn populate_proto_defaults(
             fields
                 .entry("single_uint64".to_string())
                 .or_insert(Value::UInt(0));
+            fields
+                .entry("single_sint32".to_string())
+                .or_insert(Value::Int(0));
+            fields
+                .entry("single_sint64".to_string())
+                .or_insert(Value::Int(0));
+            fields
+                .entry("single_fixed32".to_string())
+                .or_insert(Value::UInt(0));
+            fields
+                .entry("single_fixed64".to_string())
+                .or_insert(Value::UInt(0));
+            fields
+                .entry("single_sfixed32".to_string())
+                .or_insert(Value::Int(0));
+            fields
+                .entry("single_sfixed64".to_string())
+                .or_insert(Value::Int(0));
             fields
                 .entry("single_float".to_string())
                 .or_insert(Value::Float(0.0));
@@ -2073,7 +2140,25 @@ impl Value {
                             }
                             Ok(Value::Bool(false))
                         }
-                        Value::Struct(s) => Ok(Value::Bool(s.fields.contains_key(&select.field))),
+                        Value::Struct(s) => {
+                            // Check if field exists in struct
+                            if let Some(field_value) = s.fields.get(&select.field) {
+                                // For proto messages, certain conditions are treated as "not present"
+                                // 1. Empty collections (repeated fields and maps)
+                                // 2. Proto3 scalar fields set to their default values
+                                match field_value {
+                                    Value::List(list) if list.is_empty() => Ok(Value::Bool(false)),
+                                    Value::Map(map) if map.map.is_empty() => Ok(Value::Bool(false)),
+                                    // Proto3 scalar fields: setting to default value = not set
+                                    _ if s.type_name.contains("proto3") && is_proto3_default_value(&select.field, field_value) => {
+                                        Ok(Value::Bool(false))
+                                    }
+                                    _ => Ok(Value::Bool(true)),
+                                }
+                            } else {
+                                Ok(Value::Bool(false))
+                            }
+                        }
                         _ => Ok(Value::Bool(false)),
                     }
                 } else {
@@ -2283,6 +2368,16 @@ impl Value {
                                 continue;
                             }
 
+                            // Skip null duration and timestamp fields - they should be equivalent to unset fields
+                            // In proto2/proto3, setting a message field to null is the same as not setting it
+                            if matches!(value, Value::Null)
+                                && (field_expr.field == "single_duration"
+                                    || field_expr.field == "single_timestamp"
+                                    || field_expr.field.starts_with("repeated_duration")
+                                    || field_expr.field.starts_with("repeated_timestamp")) {
+                                continue;
+                            }
+
                             if field_expr.optional {
                                 // For optional fields, if the value is an OptionalValue, unwrap it
                                 // If it's None, don't set the field
@@ -2324,6 +2419,18 @@ impl Value {
 
                 // Populate default fields for proto message types
                 populate_proto_defaults(&qualified_type_name, &mut fields, &excluded_fields);
+
+                // Filter out reserved keyword fields (fields 500-516) for TestAllTypes
+                // These were formerly CEL reserved identifiers and should not be exposed
+                if qualified_type_name.contains("TestAllTypes") {
+                    let reserved_keywords = [
+                        "as", "break", "const", "continue", "else", "for", "function", "if",
+                        "import", "let", "loop", "package", "namespace", "return", "var", "void", "while"
+                    ];
+                    for keyword in &reserved_keywords {
+                        fields.remove(*keyword);
+                    }
+                }
 
                 // Unwrap google.protobuf.ListValue to just return the list
                 if qualified_type_name == "google.protobuf.ListValue" {

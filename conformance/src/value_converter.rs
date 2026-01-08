@@ -649,11 +649,38 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
     fields.insert("single_int64".to_string(), Int(msg.single_int64));
     fields.insert("single_uint32".to_string(), UInt(msg.single_uint32 as u64));
     fields.insert("single_uint64".to_string(), UInt(msg.single_uint64));
+    fields.insert("single_sint32".to_string(), Int(msg.single_sint32 as i64));
+    fields.insert("single_sint64".to_string(), Int(msg.single_sint64));
+    fields.insert("single_fixed32".to_string(), UInt(msg.single_fixed32 as u64));
+    fields.insert("single_fixed64".to_string(), UInt(msg.single_fixed64));
+    fields.insert("single_sfixed32".to_string(), Int(msg.single_sfixed32 as i64));
+    fields.insert("single_sfixed64".to_string(), Int(msg.single_sfixed64));
     fields.insert("single_float".to_string(), Float(msg.single_float as f64));
     fields.insert("single_double".to_string(), Float(msg.single_double));
 
     // Handle standalone_enum field (proto3 enums are not optional)
     fields.insert("standalone_enum".to_string(), Int(msg.standalone_enum as i64));
+
+    // Handle reserved keyword fields (fields 500-516)
+    // These will be filtered out later, but we need to include them first
+    // in case the test data sets them
+    fields.insert("as".to_string(), Bool(msg.r#as));
+    fields.insert("break".to_string(), Bool(msg.r#break));
+    fields.insert("const".to_string(), Bool(msg.r#const));
+    fields.insert("continue".to_string(), Bool(msg.r#continue));
+    fields.insert("else".to_string(), Bool(msg.r#else));
+    fields.insert("for".to_string(), Bool(msg.r#for));
+    fields.insert("function".to_string(), Bool(msg.r#function));
+    fields.insert("if".to_string(), Bool(msg.r#if));
+    fields.insert("import".to_string(), Bool(msg.r#import));
+    fields.insert("let".to_string(), Bool(msg.r#let));
+    fields.insert("loop".to_string(), Bool(msg.r#loop));
+    fields.insert("package".to_string(), Bool(msg.r#package));
+    fields.insert("namespace".to_string(), Bool(msg.r#namespace));
+    fields.insert("return".to_string(), Bool(msg.r#return));
+    fields.insert("var".to_string(), Bool(msg.r#var));
+    fields.insert("void".to_string(), Bool(msg.r#void));
+    fields.insert("while".to_string(), Bool(msg.r#while));
 
     // Handle oneof field (kind)
     if let Some(ref kind) = msg.kind {
@@ -765,6 +792,137 @@ fn convert_test_all_types_proto3_to_struct_with_bytes(
             list_items.push(convert_protobuf_value_to_cel(item)?);
         }
         fields.insert("list_value".to_string(), List(Arc::new(list_items)));
+    }
+
+    // Handle repeated fields
+    if !msg.repeated_int32.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_int32.iter().map(|&v| Int(v as i64)).collect();
+        fields.insert("repeated_int32".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_int64.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_int64.iter().map(|&v| Int(v)).collect();
+        fields.insert("repeated_int64".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_uint32.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_uint32.iter().map(|&v| UInt(v as u64)).collect();
+        fields.insert("repeated_uint32".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_uint64.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_uint64.iter().map(|&v| UInt(v)).collect();
+        fields.insert("repeated_uint64".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_float.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_float.iter().map(|&v| Float(v as f64)).collect();
+        fields.insert("repeated_float".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_double.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_double.iter().map(|&v| Float(v)).collect();
+        fields.insert("repeated_double".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_bool.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_bool.iter().map(|&v| Bool(v)).collect();
+        fields.insert("repeated_bool".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_string.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_string.iter().map(|v| String(Arc::new(v.clone()))).collect();
+        fields.insert("repeated_string".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_bytes.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_bytes.iter().map(|v| Bytes(Arc::new(v.to_vec()))).collect();
+        fields.insert("repeated_bytes".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_sint32.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_sint32.iter().map(|&v| Int(v as i64)).collect();
+        fields.insert("repeated_sint32".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_sint64.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_sint64.iter().map(|&v| Int(v)).collect();
+        fields.insert("repeated_sint64".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_fixed32.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_fixed32.iter().map(|&v| UInt(v as u64)).collect();
+        fields.insert("repeated_fixed32".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_fixed64.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_fixed64.iter().map(|&v| UInt(v)).collect();
+        fields.insert("repeated_fixed64".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_sfixed32.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_sfixed32.iter().map(|&v| Int(v as i64)).collect();
+        fields.insert("repeated_sfixed32".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_sfixed64.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_sfixed64.iter().map(|&v| Int(v)).collect();
+        fields.insert("repeated_sfixed64".to_string(), List(Arc::new(values)));
+    }
+    if !msg.repeated_nested_enum.is_empty() {
+        let values: Vec<CelValue> = msg.repeated_nested_enum.iter().map(|&v| Int(v as i64)).collect();
+        fields.insert("repeated_nested_enum".to_string(), List(Arc::new(values)));
+    }
+
+    // Handle map fields
+    if !msg.map_int32_int64.is_empty() {
+        let mut map_entries = HashMap::new();
+        for (&k, &v) in &msg.map_int32_int64 {
+            map_entries.insert(cel::objects::Key::Int(k as i64), Int(v));
+        }
+        fields.insert("map_int32_int64".to_string(), cel::objects::Value::Map(cel::objects::Map {
+            map: Arc::new(map_entries),
+        }));
+    }
+    if !msg.map_string_string.is_empty() {
+        let mut map_entries = HashMap::new();
+        for (k, v) in &msg.map_string_string {
+            map_entries.insert(cel::objects::Key::String(Arc::new(k.clone())), String(Arc::new(v.clone())));
+        }
+        fields.insert("map_string_string".to_string(), cel::objects::Value::Map(cel::objects::Map {
+            map: Arc::new(map_entries),
+        }));
+    }
+    if !msg.map_int64_int64.is_empty() {
+        let mut map_entries = HashMap::new();
+        for (&k, &v) in &msg.map_int64_int64 {
+            map_entries.insert(cel::objects::Key::Int(k), Int(v));
+        }
+        fields.insert("map_int64_int64".to_string(), cel::objects::Value::Map(cel::objects::Map {
+            map: Arc::new(map_entries),
+        }));
+    }
+    if !msg.map_uint64_uint64.is_empty() {
+        let mut map_entries = HashMap::new();
+        for (&k, &v) in &msg.map_uint64_uint64 {
+            map_entries.insert(cel::objects::Key::Uint(k), UInt(v));
+        }
+        fields.insert("map_uint64_uint64".to_string(), cel::objects::Value::Map(cel::objects::Map {
+            map: Arc::new(map_entries),
+        }));
+    }
+    if !msg.map_string_int64.is_empty() {
+        let mut map_entries = HashMap::new();
+        for (k, &v) in &msg.map_string_int64 {
+            map_entries.insert(cel::objects::Key::String(Arc::new(k.clone())), Int(v));
+        }
+        fields.insert("map_string_int64".to_string(), cel::objects::Value::Map(cel::objects::Map {
+            map: Arc::new(map_entries),
+        }));
+    }
+    if !msg.map_int32_string.is_empty() {
+        let mut map_entries = HashMap::new();
+        for (&k, v) in &msg.map_int32_string {
+            map_entries.insert(cel::objects::Key::Int(k as i64), String(Arc::new(v.clone())));
+        }
+        fields.insert("map_int32_string".to_string(), cel::objects::Value::Map(cel::objects::Map {
+            map: Arc::new(map_entries),
+        }));
+    }
+    if !msg.map_bool_bool.is_empty() {
+        let mut map_entries = HashMap::new();
+        for (&k, &v) in &msg.map_bool_bool {
+            map_entries.insert(cel::objects::Key::Bool(k), Bool(v));
+        }
+        fields.insert("map_bool_bool".to_string(), cel::objects::Value::Map(cel::objects::Map {
+            map: Arc::new(map_entries),
+        }));
     }
 
     // If oneof field wasn't set by prost decoding, try to parse it manually from wire format
@@ -884,6 +1042,26 @@ fn convert_test_all_types_proto2_to_struct(
     }
     if let Some(d) = msg.single_double {
         fields.insert("single_double".to_string(), Float(d));
+    }
+
+    // Handle specialized integer types (proto2 optional fields)
+    if let Some(i) = msg.single_sint32 {
+        fields.insert("single_sint32".to_string(), Int(i as i64));
+    }
+    if let Some(i) = msg.single_sint64 {
+        fields.insert("single_sint64".to_string(), Int(i));
+    }
+    if let Some(u) = msg.single_fixed32 {
+        fields.insert("single_fixed32".to_string(), UInt(u as u64));
+    }
+    if let Some(u) = msg.single_fixed64 {
+        fields.insert("single_fixed64".to_string(), UInt(u));
+    }
+    if let Some(i) = msg.single_sfixed32 {
+        fields.insert("single_sfixed32".to_string(), Int(i as i64));
+    }
+    if let Some(i) = msg.single_sfixed64 {
+        fields.insert("single_sfixed64".to_string(), Int(i));
     }
 
     // Handle standalone_enum field
