@@ -104,7 +104,7 @@ impl<'a> Context<'a> {
                 variables,
                 parent,
                 resolver,
-                ..
+                container,
             } => resolver
                 .and_then(|r| r.resolve(name))
                 .or_else(|| {
@@ -113,16 +113,80 @@ impl<'a> Context<'a> {
                         .cloned()
                         .or_else(|| parent.get_variable(name).ok())
                 })
+                .or_else(|| {
+                    // Try qualified name resolution with container
+                    if let Some(container_name) = container {
+                        self.try_qualified_lookup(name, container_name, variables, Some(parent))
+                    } else {
+                        None
+                    }
+                })
                 .ok_or_else(|| ExecutionError::UndeclaredReference(name.to_string().into())),
             Context::Root {
                 variables,
                 resolver,
+                container,
                 ..
             } => resolver
                 .and_then(|r| r.resolve(name))
                 .or_else(|| variables.get(name).cloned())
+                .or_else(|| {
+                    // Try qualified name resolution with container
+                    if let Some(container_name) = container {
+                        self.try_qualified_lookup(name, container_name, variables, None)
+                    } else {
+                        None
+                    }
+                })
                 .ok_or_else(|| ExecutionError::UndeclaredReference(name.to_string().into())),
         }
+    }
+
+    /// Attempts to resolve a variable name using qualified name resolution.
+    ///
+    /// According to the CEL spec, when a container is set, identifiers should be resolved
+    /// by trying progressively shorter prefixes. For example, if the container is "a.b.c"
+    /// and we're looking for identifier "x", we should try:
+    /// 1. "x" (already tried in get_variable)
+    /// 2. "a.b.c.x"
+    /// 3. "a.b.x"
+    /// 4. "a.x"
+    fn try_qualified_lookup(
+        &self,
+        name: &str,
+        container: &str,
+        variables: &BTreeMap<String, Value>,
+        parent: Option<&Context<'_>>,
+    ) -> Option<Value> {
+        // Build a list of candidate names to try
+        let mut candidates = Vec::new();
+
+        // Add the fully qualified name
+        candidates.push(format!("{}.{}", container, name));
+
+        // Add progressively shorter prefixes
+        let parts: Vec<&str> = container.split('.').collect();
+        for i in (1..parts.len()).rev() {
+            let prefix = parts[..i].join(".");
+            candidates.push(format!("{}.{}", prefix, name));
+        }
+
+        // Try each candidate
+        for candidate in candidates {
+            // Check in current context's variables
+            if let Some(value) = variables.get(&candidate) {
+                return Some(value.clone());
+            }
+
+            // Check in parent context if available
+            if let Some(parent) = parent {
+                if let Ok(value) = parent.get_variable(&candidate) {
+                    return Some(value);
+                }
+            }
+        }
+
+        None
     }
 
     pub fn get_extension_registry(&self) -> Option<&ExtensionRegistry> {
@@ -140,10 +204,49 @@ impl<'a> Context<'a> {
     }
 
     pub(crate) fn get_function(&self, name: &str) -> Option<&Function> {
-        match self {
+        // First try direct lookup
+        let direct = match self {
             Context::Root { functions, .. } => functions.get(name),
             Context::Child { parent, .. } => parent.get_function(name),
+        };
+
+        if direct.is_some() {
+            return direct;
         }
+
+        // Try qualified name resolution with container
+        let container_name = self.get_container()?;
+
+        // Build a list of candidate names to try
+        let mut candidates = Vec::new();
+
+        // Add the fully qualified name
+        candidates.push(format!("{}.{}", container_name, name));
+
+        // Add progressively shorter prefixes
+        let parts: Vec<&str> = container_name.split('.').collect();
+        for i in (1..parts.len()).rev() {
+            let prefix = parts[..i].join(".");
+            candidates.push(format!("{}.{}", prefix, name));
+        }
+
+        // Try each candidate
+        for candidate in &candidates {
+            match self {
+                Context::Root { functions, .. } => {
+                    if let Some(func) = functions.get(candidate) {
+                        return Some(func);
+                    }
+                }
+                Context::Child { parent, .. } => {
+                    if let Some(func) = parent.get_function(candidate) {
+                        return Some(func);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     pub fn add_function<T: 'static, F>(&mut self, name: &str, value: F)
@@ -182,6 +285,15 @@ impl<'a> Context<'a> {
             }
         }
         self
+    }
+
+    pub fn get_container(&self) -> Option<&str> {
+        match self {
+            Context::Root { container, .. } => container.as_deref(),
+            Context::Child { container, parent, .. } => {
+                container.as_deref().or_else(|| parent.get_container())
+            }
+        }
     }
 
     /// Constructs a new empty context with no variables or functions.
