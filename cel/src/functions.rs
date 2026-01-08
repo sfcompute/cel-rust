@@ -302,6 +302,37 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
     })
 }
 
+// Performs a type conversion to list.
+pub fn list(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::List(v) => Value::List(v.clone()),
+        v => return Err(ftx.error(format!("cannot convert {v:?} to list"))),
+    })
+}
+
+// Performs a type conversion to map.
+pub fn map(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::Map(v) => Value::Map(v.clone()),
+        v => return Err(ftx.error(format!("cannot convert {v:?} to map"))),
+    })
+}
+
+// Performs a type conversion to null_type.
+pub fn null_type(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::Null => Value::Null,
+        v => return Err(ftx.error(format!("cannot convert {v:?} to null_type"))),
+    })
+}
+
+// Performs a type conversion to dynamic type (dyn).
+// In CEL, dyn() is essentially an identity function that returns the value as-is,
+// indicating it should be treated as a dynamic type.
+pub fn dyn_conversion(_ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(this)
+}
+
 pub fn optional_none(ftx: &FunctionContext) -> Result<Value> {
     if ftx.this.is_some() || !ftx.args.is_empty() {
         return Err(ftx.error("unsupported function"));
@@ -1154,6 +1185,44 @@ mod tests {
             ("int", "10.int() == 10"),
             ("uint", "10.uint().int() == 10"),
             ("double", "10.5.int() == 10"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_list() {
+        [
+            ("list", "[1, 2, 3].list() == [1, 2, 3]"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_map() {
+        [
+            ("map", "{'a': 1, 'b': 2}.map() == {'a': 1, 'b': 2}"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_null_type() {
+        [
+            ("null", "null.null_type() == null"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_dyn() {
+        [
+            ("int", "10.dyn() == 10"),
+            ("string", "'hello'.dyn() == 'hello'"),
+            ("list", "[1, 2, 3].dyn() == [1, 2, 3]"),
         ]
         .iter()
         .for_each(assert_script);
