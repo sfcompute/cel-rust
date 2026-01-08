@@ -77,6 +77,7 @@ pub fn size(ftx: &FunctionContext, This(this): This<Value>) -> Result<i64> {
     let size = match this {
         Value::List(l) => l.len(),
         Value::Map(m) => m.map.len(),
+        Value::Struct(s) => s.fields.len(),
         Value::String(s) => s.len(),
         Value::Bytes(b) => b.len(),
         value => return Err(ftx.error(format!("cannot determine the size of {value:?}"))),
@@ -300,6 +301,37 @@ pub fn int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         Value::UInt(v) => Value::Int(v.try_into().map_err(|_| ftx.error("integer overflow"))?),
         v => return Err(ftx.error(format!("cannot convert {v:?} to int"))),
     })
+}
+
+// Performs a type conversion to list.
+pub fn list(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::List(v) => Value::List(v.clone()),
+        v => return Err(ftx.error(format!("cannot convert {v:?} to list"))),
+    })
+}
+
+// Performs a type conversion to map.
+pub fn map(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::Map(v) => Value::Map(v.clone()),
+        v => return Err(ftx.error(format!("cannot convert {v:?} to map"))),
+    })
+}
+
+// Performs a type conversion to null_type.
+pub fn null_type(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::Null => Value::Null,
+        v => return Err(ftx.error(format!("cannot convert {v:?} to null_type"))),
+    })
+}
+
+// Performs a type conversion to dynamic type (dyn).
+// In CEL, dyn() is essentially an identity function that returns the value as-is,
+// indicating it should be treated as a dynamic type.
+pub fn dyn_conversion(_ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
+    Ok(this)
 }
 
 pub fn optional_none(ftx: &FunctionContext) -> Result<Value> {
@@ -654,6 +686,143 @@ pub mod time {
     ) -> Result<Value> {
         Ok((this.timestamp_subsec_millis() as i32).into())
     }
+}
+
+/// Returns true if the target value is NaN (Not a Number).
+///
+/// This function checks if a floating-point value is NaN. For non-float values,
+/// it returns false.
+///
+/// # Examples
+/// ```cel
+/// isNaN(0.0 / 0.0) == true
+/// isNaN(1.0 / 0.0) == false
+/// isNaN(1.0) == false
+/// ```
+pub fn is_nan(This(this): This<Value>) -> Result<bool> {
+    Ok(match this {
+        Value::Float(v) => v.is_nan(),
+        _ => false,
+    })
+}
+
+/// Returns true if the target value is infinite (positive or negative infinity).
+///
+/// This function checks if a floating-point value is infinite. For non-float values,
+/// it returns false.
+///
+/// # Examples
+/// ```cel
+/// isInf(1.0 / 0.0) == true
+/// isInf(-1.0 / 0.0) == true
+/// isInf(1.0) == false
+/// ```
+pub fn is_inf(This(this): This<Value>) -> Result<bool> {
+    Ok(match this {
+        Value::Float(v) => v.is_infinite(),
+        _ => false,
+    })
+}
+
+/// Returns true if the target value is finite (not NaN and not infinite).
+///
+/// This function checks if a value is finite. For integer types, always returns true.
+/// For floating-point values, returns true only if the value is neither NaN nor infinite.
+///
+/// # Examples
+/// ```cel
+/// isFinite(1.0) == true
+/// isFinite(1.0 / 0.0) == false
+/// isFinite(0.0 / 0.0) == false
+/// isFinite(42) == true
+/// ```
+pub fn is_finite(This(this): This<Value>) -> Result<bool> {
+    Ok(match this {
+        Value::Float(v) => v.is_finite(),
+        Value::Int(_) | Value::UInt(_) => true,
+        _ => false,
+    })
+}
+
+/// Returns the ceiling of the target value (rounds up to the nearest integer).
+///
+/// For float values, returns the smallest integer greater than or equal to the value.
+/// For integer values, returns the value unchanged.
+///
+/// # Examples
+/// ```cel
+/// ceil(1.2) == 2.0
+/// ceil(-1.2) == -1.0
+/// ceil(5) == 5.0
+/// ```
+pub fn ceil(This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::Float(v) => Value::Float(v.ceil()),
+        Value::Int(v) => Value::Float(v as f64),
+        Value::UInt(v) => Value::Float(v as f64),
+        _ => return Err(ExecutionError::function_error("ceil", "argument must be numeric")),
+    })
+}
+
+/// Returns the floor of the target value (rounds down to the nearest integer).
+///
+/// For float values, returns the largest integer less than or equal to the value.
+/// For integer values, returns the value unchanged.
+///
+/// # Examples
+/// ```cel
+/// floor(1.8) == 1.0
+/// floor(-1.2) == -2.0
+/// floor(5) == 5.0
+/// ```
+pub fn floor(This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::Float(v) => Value::Float(v.floor()),
+        Value::Int(v) => Value::Float(v as f64),
+        Value::UInt(v) => Value::Float(v as f64),
+        _ => return Err(ExecutionError::function_error("floor", "argument must be numeric")),
+    })
+}
+
+/// Truncates the target value toward zero (removes the fractional part).
+///
+/// For float values, returns the integer part by removing the fractional component.
+/// For integer values, returns the value unchanged.
+///
+/// # Examples
+/// ```cel
+/// trunc(1.8) == 1.0
+/// trunc(-1.8) == -1.0
+/// trunc(5) == 5.0
+/// ```
+pub fn trunc(This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::Float(v) => Value::Float(v.trunc()),
+        Value::Int(v) => Value::Float(v as f64),
+        Value::UInt(v) => Value::Float(v as f64),
+        _ => return Err(ExecutionError::function_error("trunc", "argument must be numeric")),
+    })
+}
+
+/// Rounds the target value to the nearest integer.
+///
+/// For float values, returns the nearest integer using "round half away from zero" rounding.
+/// For integer values, returns the value unchanged.
+///
+/// # Examples
+/// ```cel
+/// round(1.4) == 1.0
+/// round(1.5) == 2.0
+/// round(-1.5) == -2.0
+/// round(5) == 5.0
+/// ```
+pub fn round(This(this): This<Value>) -> Result<Value> {
+    Ok(match this {
+        Value::Float(v) => Value::Float(v.round()),
+        Value::Int(v) => Value::Float(v as f64),
+        Value::UInt(v) => Value::Float(v as f64),
+        _ => return Err(ExecutionError::function_error("round", "argument must be numeric")),
+    })
 }
 
 pub fn max(Arguments(args): Arguments) -> Result<Value> {
@@ -1198,6 +1367,44 @@ mod tests {
     }
 
     #[test]
+    fn test_list() {
+        [
+            ("list", "[1, 2, 3].list() == [1, 2, 3]"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_map() {
+        [
+            ("map", "{'a': 1, 'b': 2}.map() == {'a': 1, 'b': 2}"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_null_type() {
+        [
+            ("null", "null.null_type() == null"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_dyn() {
+        [
+            ("int", "10.dyn() == 10"),
+            ("string", "'hello'.dyn() == 'hello'"),
+            ("list", "[1, 2, 3].dyn() == [1, 2, 3]"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
     fn no_bool_coercion() {
         [
             ("string || bool", "'' || false", "No such overload"),
@@ -1361,5 +1568,103 @@ mod tests {
                 panic!("Expected UnsupportedBinaryOperator error, got: {:?}", other);
             }
         }
+    }
+
+    #[test]
+    fn test_is_nan() {
+        [
+            ("isNaN with NaN", "isNaN(0.0 / 0.0) == true"),
+            ("isNaN with infinity", "isNaN(1.0 / 0.0) == false"),
+            ("isNaN with normal float", "isNaN(1.0) == false"),
+            ("isNaN with int", "isNaN(42) == false"),
+            ("isNaN method call", "(0.0 / 0.0).isNaN() == true"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_is_inf() {
+        [
+            ("isInf with positive infinity", "isInf(1.0 / 0.0) == true"),
+            ("isInf with negative infinity", "isInf(-1.0 / 0.0) == true"),
+            ("isInf with normal float", "isInf(1.0) == false"),
+            ("isInf with NaN", "isInf(0.0 / 0.0) == false"),
+            ("isInf with int", "isInf(42) == false"),
+            ("isInf method call", "(1.0 / 0.0).isInf() == true"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_is_finite() {
+        [
+            ("isFinite with normal float", "isFinite(1.0) == true"),
+            ("isFinite with int", "isFinite(42) == true"),
+            ("isFinite with uint", "isFinite(42u) == true"),
+            ("isFinite with infinity", "isFinite(1.0 / 0.0) == false"),
+            ("isFinite with NaN", "isFinite(0.0 / 0.0) == false"),
+            ("isFinite method call", "1.0.isFinite() == true"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_ceil() {
+        [
+            ("ceil positive decimal", "ceil(1.2) == 2.0"),
+            ("ceil negative decimal", "ceil(-1.2) == -1.0"),
+            ("ceil int", "ceil(5) == 5.0"),
+            ("ceil uint", "ceil(5u) == 5.0"),
+            ("ceil whole number", "ceil(3.0) == 3.0"),
+            ("ceil method call", "1.2.ceil() == 2.0"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_floor() {
+        [
+            ("floor positive decimal", "floor(1.8) == 1.0"),
+            ("floor negative decimal", "floor(-1.2) == -2.0"),
+            ("floor int", "floor(5) == 5.0"),
+            ("floor uint", "floor(5u) == 5.0"),
+            ("floor whole number", "floor(3.0) == 3.0"),
+            ("floor method call", "1.8.floor() == 1.0"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_trunc() {
+        [
+            ("trunc positive decimal", "trunc(1.8) == 1.0"),
+            ("trunc negative decimal", "trunc(-1.8) == -1.0"),
+            ("trunc int", "trunc(5) == 5.0"),
+            ("trunc uint", "trunc(5u) == 5.0"),
+            ("trunc whole number", "trunc(3.0) == 3.0"),
+            ("trunc method call", "1.8.trunc() == 1.0"),
+        ]
+        .iter()
+        .for_each(assert_script);
+    }
+
+    #[test]
+    fn test_round() {
+        [
+            ("round 1.4", "round(1.4) == 1.0"),
+            ("round 1.5", "round(1.5) == 2.0"),
+            ("round -1.5", "round(-1.5) == -2.0"),
+            ("round int", "round(5) == 5.0"),
+            ("round uint", "round(5u) == 5.0"),
+            ("round whole number", "round(3.0) == 3.0"),
+            ("round method call", "1.5.round() == 2.0"),
+        ]
+        .iter()
+        .for_each(assert_script);
     }
 }

@@ -1265,30 +1265,38 @@ impl Value {
                 Value::resolve(&comprehension.result, &ctx)
             }
             Expr::Struct(struct_expr) => {
-                let mut map = HashMap::with_capacity(struct_expr.entries.len());
+                let mut fields = HashMap::with_capacity(struct_expr.entries.len());
                 for entry in struct_expr.entries.iter() {
-                    let (field_name, v, is_optional) = match &entry.expr {
-                        EntryExpr::StructField(e) => (&e.field, &e.value, e.optional),
-                        EntryExpr::MapEntry(_) => panic!("Unexpected MapEntry in Struct"),
+                    let (field_name, field_value, is_optional) = match &entry.expr {
+                        EntryExpr::StructField(field_expr) => {
+                            (&field_expr.field, &field_expr.value, field_expr.optional)
+                        }
+                        EntryExpr::MapEntry(_) => {
+                            return Err(ExecutionError::function_error(
+                                "struct",
+                                "Map entries not allowed in struct literals",
+                            ));
+                        }
                     };
-                    let key: Key = field_name.clone().into();
-                    let value = Value::resolve(v, ctx)?;
+                    let value = Value::resolve(field_value, ctx)?;
 
                     if is_optional {
                         if let Ok(opt_val) = <&OptionalValue>::try_from(&value) {
                             if let Some(inner) = opt_val.value() {
-                                map.insert(key, inner.clone());
+                                fields.insert(field_name.clone(), inner.clone());
                             }
                         } else {
-                            map.insert(key, value);
+                            fields.insert(field_name.clone(), value);
                         }
                     } else {
-                        map.insert(key, value);
+                        fields.insert(field_name.clone(), value);
                     }
                 }
-                Ok(Value::Map(Map {
-                    map: Arc::from(map),
-                }))
+                Value::Struct(Struct {
+                    type_name: Arc::new(struct_expr.type_name.clone()),
+                    fields: Arc::new(fields),
+                })
+                .into()
             }
             Expr::Unspecified => panic!("Can't evaluate Unspecified Expr"),
         }
@@ -1317,8 +1325,16 @@ impl Value {
                     .ok_or_else(|| ExecutionError::NoSuchKey(name.clone()))
                     .into()
             }
+            Value::Struct(ref s) => {
+                // For structs, look up the field by name
+                s.fields
+                    .get(name.as_str())
+                    .cloned()
+                    .ok_or_else(|| ExecutionError::NoSuchKey(name.clone()))
+                    .into()
+            }
             _ => {
-                // For non-map types, accessing a field is always an error
+                // For non-map/non-struct types, accessing a field is always an error
                 // Return NoSuchKey to indicate the field doesn't exist on this type
                 ExecutionError::NoSuchKey(name.clone()).into()
             }
