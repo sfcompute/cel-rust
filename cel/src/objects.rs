@@ -855,16 +855,22 @@ impl Value {
                         }
                         operators::LOGICAL_OR => {
                             let left = Value::resolve(&call.args[0], ctx)?;
-                            return if left.to_bool()? {
-                                left.into()
+                            // Short-circuit: if left is exactly Bool(true), return true
+                            // Otherwise, evaluate right and return its boolean value
+                            return if matches!(left, Value::Bool(true)) {
+                                Value::Bool(true).into()
                             } else {
-                                Value::resolve(&call.args[1], ctx)
-                            };
+                                let right = Value::resolve(&call.args[1], ctx)?;
+                                Value::Bool(right.to_bool()?)
+                            }
+                            .into();
                         }
                         operators::LOGICAL_AND => {
                             let left = Value::resolve(&call.args[0], ctx)?;
-                            return if !left.to_bool()? {
-                                Value::Bool(false)
+                            // Short-circuit: if left is exactly Bool(false), return false
+                            // Otherwise, evaluate right and return its boolean value
+                            return if matches!(left, Value::Bool(false)) {
+                                Value::Bool(false).into()
                             } else {
                                 let right = Value::resolve(&call.args[1], ctx)?;
                                 Value::Bool(right.to_bool()?)
