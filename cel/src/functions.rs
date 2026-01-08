@@ -356,6 +356,44 @@ pub fn optional_or_value(This(this): This<Value>, other: Value) -> Result<Value>
     }
 }
 
+pub fn optional_opt_map(ftx: &FunctionContext) -> Result<Value> {
+    // optMap takes 2 arguments: the optional value (this) and a lambda/expression
+    if ftx.this.is_none() || ftx.args.len() != 2 {
+        return Err(ftx.error("optMap requires 2 arguments"));
+    }
+
+    let this = ftx.this.as_ref().unwrap();
+    let this_opt: &OptionalValue = this.try_into()?;
+
+    // If the optional has no value, return none
+    if this_opt.value().is_none() {
+        return Ok(Value::Opaque(Arc::new(OptionalValue::none())));
+    }
+
+    // Otherwise, we need to evaluate the lambda with the value
+    // For now, return an error indicating this needs macro expansion support
+    Err(ftx.error("optMap requires macro expansion support"))
+}
+
+pub fn optional_opt_flat_map(ftx: &FunctionContext) -> Result<Value> {
+    // optFlatMap takes 2 arguments: the optional value (this) and a lambda/expression
+    if ftx.this.is_none() || ftx.args.len() != 2 {
+        return Err(ftx.error("optFlatMap requires 2 arguments"));
+    }
+
+    let this = ftx.this.as_ref().unwrap();
+    let this_opt: &OptionalValue = this.try_into()?;
+
+    // If the optional has no value, return none
+    if this_opt.value().is_none() {
+        return Ok(Value::Opaque(Arc::new(OptionalValue::none())));
+    }
+
+    // Otherwise, we need to evaluate the lambda with the value
+    // For now, return an error indicating this needs macro expansion support
+    Err(ftx.error("optFlatMap requires macro expansion support"))
+}
+
 /// Returns true if a string starts with another string.
 ///
 /// # Example

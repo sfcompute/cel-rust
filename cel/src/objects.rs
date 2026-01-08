@@ -948,6 +948,27 @@ impl Value {
                                         ExecutionError::NoSuchKey(property.to_string().into())
                                     })
                                 }
+                                (Value::Map(map), Value::Float(property)) => {
+                                    // Try to convert float to int or uint if it's a whole number
+                                    if property.fract() == 0.0 && property >= 0.0 {
+                                        let uint_key: Key = (property as u64).into();
+                                        if let Some(value) = map.get(&uint_key).cloned() {
+                                            Ok(value)
+                                        } else {
+                                            let int_key: Key = (property as i64).into();
+                                            map.get(&int_key).cloned().ok_or_else(|| {
+                                                ExecutionError::NoSuchKey(property.to_string().into())
+                                            })
+                                        }
+                                    } else if property.fract() == 0.0 {
+                                        let int_key: Key = (property as i64).into();
+                                        map.get(&int_key).cloned().ok_or_else(|| {
+                                            ExecutionError::NoSuchKey(property.to_string().into())
+                                        })
+                                    } else {
+                                        Err(ExecutionError::NoSuchKey(property.to_string().into()))
+                                    }
+                                }
                                 (Value::Map(_), index) => {
                                     Err(ExecutionError::UnsupportedMapIndex(index))
                                 }
@@ -982,15 +1003,17 @@ impl Value {
                             };
                             if let Ok(opt_val) = <&OptionalValue>::try_from(&operand) {
                                 return match opt_val.value() {
-                                    Some(inner) => Ok(Value::Opaque(Arc::new(OptionalValue::of(
-                                        inner.clone().member(&field)?,
-                                    )))),
+                                    Some(inner) => match inner.clone().member(&field) {
+                                        Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
+                                        Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+                                    },
                                     None => Ok(operand),
                                 };
                             }
-                            return Ok(Value::Opaque(Arc::new(OptionalValue::of(
-                                operand.member(&field)?,
-                            ))));
+                            return match operand.member(&field) {
+                                Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
+                                Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+                            };
                         }
                         _ => (),
                     }
@@ -1063,6 +1086,20 @@ impl Value {
             Expr::Ident(name) => ctx.get_variable(name),
             Expr::Select(select) => {
                 let left = Value::resolve(select.operand.deref(), ctx)?;
+
+                // Handle optional value propagation for regular field access
+                if !select.test {
+                    if let Ok(opt_val) = <&OptionalValue>::try_from(&left) {
+                        return match opt_val.value() {
+                            Some(inner) => match inner.clone().member(&select.field) {
+                                Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
+                                Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
+                            },
+                            None => Ok(left),
+                        };
+                    }
+                }
+
                 if select.test {
                     match &left {
                         Value::Map(map) => {
@@ -1083,6 +1120,26 @@ impl Value {
                             }
 
                             Ok(Value::Bool(false))
+                        }
+                        // Handle has() with optional values
+                        Value::Opaque(opaque) => {
+                            if let Ok(opt_val) = <&OptionalValue>::try_from(&left) {
+                                match opt_val.value() {
+                                    Some(inner) => {
+                                        if let Value::Map(map) = inner {
+                                            for key in map.map.deref().keys() {
+                                                if key.to_string().eq(&select.field) {
+                                                    return Ok(Value::Bool(true));
+                                                }
+                                            }
+                                        }
+                                        Ok(Value::Bool(false))
+                                    }
+                                    None => Ok(Value::Bool(false)),
+                                }
+                            } else {
+                                Ok(Value::Bool(false))
+                            }
                         }
                         _ => Ok(Value::Bool(false)),
                     }
@@ -1207,7 +1264,32 @@ impl Value {
                 }
                 Value::resolve(&comprehension.result, &ctx)
             }
-            Expr::Struct(_) => todo!("Support structs!"),
+            Expr::Struct(struct_expr) => {
+                let mut map = HashMap::with_capacity(struct_expr.entries.len());
+                for entry in struct_expr.entries.iter() {
+                    let (field_name, v, is_optional) = match &entry.expr {
+                        EntryExpr::StructField(e) => (&e.field, &e.value, e.optional),
+                        EntryExpr::MapEntry(_) => panic!("Unexpected MapEntry in Struct"),
+                    };
+                    let key: Key = field_name.clone().into();
+                    let value = Value::resolve(v, ctx)?;
+
+                    if is_optional {
+                        if let Ok(opt_val) = <&OptionalValue>::try_from(&value) {
+                            if let Some(inner) = opt_val.value() {
+                                map.insert(key, inner.clone());
+                            }
+                        } else {
+                            map.insert(key, value);
+                        }
+                    } else {
+                        map.insert(key, value);
+                    }
+                }
+                Ok(Value::Map(Map {
+                    map: Arc::from(map),
+                }))
+            }
             Expr::Unspecified => panic!("Can't evaluate Unspecified Expr"),
         }
     }
