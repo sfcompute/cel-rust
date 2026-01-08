@@ -77,6 +77,7 @@ pub fn size(ftx: &FunctionContext, This(this): This<Value>) -> Result<i64> {
     let size = match this {
         Value::List(l) => l.len(),
         Value::Map(m) => m.map.len(),
+        Value::Struct(s) => s.fields.len(),
         Value::String(s) => s.len(),
         Value::Bytes(b) => b.len(),
         value => return Err(ftx.error(format!("cannot determine the size of {value:?}"))),
