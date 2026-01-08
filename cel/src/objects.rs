@@ -1121,6 +1121,10 @@ impl Value {
 
                             Ok(Value::Bool(false))
                         }
+                        Value::Struct(s) => {
+                            // Check if field exists in struct
+                            Ok(Value::Bool(s.fields.contains_key(&select.field)))
+                        }
                         // Handle has() with optional values
                         Value::Opaque(opaque) => {
                             if let Ok(opt_val) = <&OptionalValue>::try_from(&left) {
@@ -1132,6 +1136,8 @@ impl Value {
                                                     return Ok(Value::Bool(true));
                                                 }
                                             }
+                                        } else if let Value::Struct(s) = inner {
+                                            return Ok(Value::Bool(s.fields.contains_key(&select.field)));
                                         }
                                         Ok(Value::Bool(false))
                                     }
