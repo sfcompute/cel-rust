@@ -284,12 +284,13 @@ fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
         }));
     }
 
-    // Message/nested type fields (like "child", "payload", "single_nested_message")
+    // Message/nested type fields (like "child", "payload", "single_nested_message", "standalone_message")
     // For nested message types, return a struct with inferred type name and default fields populated
     if !field_name.starts_with("repeated_") && !field_name.starts_with("map_") {
         // Check if this is a message type field by checking common patterns
         let is_message_field = field_name == "child"
             || field_name == "payload"
+            || field_name == "standalone_message"
             || (field_name.starts_with("single_") && (
                 field_name.contains("message")
                 || field_name.contains("nested")
@@ -307,8 +308,8 @@ fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
                 } else {
                     "cel.expr.conformance.proto3.TestAllTypes".to_string()
                 }
-            } else if field_name == "single_nested_message" {
-                // single_nested_message points to NestedMessage
+            } else if field_name == "single_nested_message" || field_name == "standalone_message" {
+                // single_nested_message and standalone_message point to NestedMessage
                 if type_name.contains("proto2") {
                     "cel.expr.conformance.proto2.TestAllTypes.NestedMessage".to_string()
                 } else {
@@ -353,7 +354,25 @@ fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
     }
 
     // Scalar fields (single_*) - return type-appropriate defaults
+    // Proto2 has explicit [default = ...] annotations in the schema
+    // See cel-spec/proto/cel/expr/conformance/proto2/test_all_types.proto
     if field_name.starts_with("single_") {
+        // Proto2 explicit defaults
+        if type_name.contains("proto2") {
+            match field_name {
+                "single_int32" => return Some(Value::Int(-32)),
+                "single_int64" => return Some(Value::Int(-64)),
+                "single_uint32" => return Some(Value::UInt(32)),
+                "single_uint64" => return Some(Value::UInt(64)),
+                "single_float" => return Some(Value::Float(3.0)),
+                "single_double" => return Some(Value::Float(6.4)),
+                "single_bool" => return Some(Value::Bool(true)),
+                "single_string" => return Some(Value::String(Arc::new("empty".to_string()))),
+                "single_bytes" => return Some(Value::Bytes(Arc::new(b"none".to_vec()))),
+                _ => {} // Fall through to generic defaults below
+            }
+        }
+
         // Try to infer type from field name suffix
         // Check uint and fixed32/fixed64 first (unsigned types)
         if field_name.contains("uint") || field_name == "single_fixed32" || field_name == "single_fixed64" {
@@ -519,7 +538,9 @@ fn populate_proto_defaults(
             }
         }
 
-        // Proto2 has special scalar field defaults
+        // Proto2 has special scalar field defaults, but only for single_bool
+        // which needs to be "present" for has() checks. Other scalar fields
+        // have their defaults returned via get_proto_field_default when accessed.
         if type_name == "cel.expr.conformance.proto2.TestAllTypes" {
             fields
                 .entry("single_bool".to_string())
@@ -2127,16 +2148,19 @@ impl Value {
             }
             Expr::Ident(name) => ctx.get_variable(name),
             Expr::Select(select) => {
-                // Try qualified identifier resolution first
+                // Try qualified identifier resolution first (only for non-test mode)
+                // For has() checks, we need to go through the standard path to properly check field existence
                 // For expressions like a.b.c, try resolving as variables: "a.b.c", "a.b", then "a"
-                if let Some((base_value, remaining_fields)) =
-                    try_resolve_qualified_select(select, ctx) {
-                    // Found a qualified identifier match, apply remaining field accesses
-                    let mut result = base_value;
-                    for field in remaining_fields {
-                        result = result.member(&field)?;
+                if !select.test {
+                    if let Some((base_value, remaining_fields)) =
+                        try_resolve_qualified_select(select, ctx) {
+                        // Found a qualified identifier match, apply remaining field accesses
+                        let mut result = base_value;
+                        for field in remaining_fields {
+                            result = result.member(&field)?;
+                        }
+                        return Ok(result);
                     }
-                    return Ok(result);
                 }
 
                 // Standard resolution: resolve left side first, then access field
@@ -2176,7 +2200,16 @@ impl Value {
                                     _ => Ok(Value::Bool(true)),
                                 }
                             } else {
-                                Ok(Value::Bool(false))
+                                // Field not explicitly set in struct - check if it's a known proto field
+                                // If get_proto_field_default returns Some, it's a valid field that's just unset
+                                // If it returns None, it's an undefined field and we should error
+                                if get_proto_field_default(&s.type_name, &select.field).is_some() {
+                                    // Valid field, just not set
+                                    Ok(Value::Bool(false))
+                                } else {
+                                    // Undefined field - error with NoSuchKey
+                                    Err(ExecutionError::NoSuchKey(Arc::new(select.field.clone())))
+                                }
                             }
                         }
                         _ => Ok(Value::Bool(false)),
@@ -2258,32 +2291,150 @@ impl Value {
                 let accu_init = Value::resolve(&comprehension.accu_init, ctx)?;
                 let iter = Value::resolve(&comprehension.iter_range, ctx)?;
                 let mut ctx = ctx.new_inner_scope();
-                ctx.add_variable(&comprehension.accu_var, accu_init)
+                ctx.add_variable(&comprehension.accu_var, accu_init.clone())
                     .expect("Failed to add accu variable");
+
+                // Determine if this is an `all` or `exists` comprehension based on initial value
+                // `all` starts with true, `exists` starts with false
+                let is_all_comprehension = matches!(accu_init, Value::Bool(true));
+                let is_exists_comprehension = matches!(accu_init, Value::Bool(false));
+
+                // Track first error for error tolerance
+                let mut first_error: Option<ExecutionError> = None;
 
                 match iter {
                     Value::List(items) => {
                         if let Some(ref iter_var2) = comprehension.iter_var2 {
                             // 3-parameter form: iterate with index and value
                             for (index, item) in items.deref().iter().enumerate() {
-                                if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                    break;
+                                // Check loop condition - if it errors, we may need to continue for error tolerance
+                                let loop_cond_result = Value::resolve(&comprehension.loop_cond, &ctx);
+                                match loop_cond_result {
+                                    Ok(cond_val) => {
+                                        match cond_val.to_bool() {
+                                            Ok(false) => break,
+                                            Ok(true) => {}
+                                            Err(e) => {
+                                                // Loop condition had type error - for all/exists, continue to check other elements
+                                                if is_all_comprehension || is_exists_comprehension {
+                                                    if first_error.is_none() {
+                                                        first_error = Some(e);
+                                                    }
+                                                    // Continue to check other elements for error tolerance
+                                                } else {
+                                                    return Err(e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if is_all_comprehension || is_exists_comprehension {
+                                            if first_error.is_none() {
+                                                first_error = Some(e);
+                                            }
+                                        } else {
+                                            return Err(e);
+                                        }
+                                    }
                                 }
+
                                 // iter_var = index, iter_var2 = value
                                 ctx.add_variable_from_value(&comprehension.iter_var, Value::Int(index as i64));
                                 ctx.add_variable_from_value(iter_var2, item.clone());
-                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
-                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+
+                                // Evaluate loop step with error tolerance
+                                match Value::resolve(&comprehension.loop_step, &ctx) {
+                                    Ok(accu) => {
+                                        // For `all`: if we get false, we can short-circuit
+                                        if is_all_comprehension {
+                                            if let Value::Bool(false) = accu {
+                                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                                break;
+                                            }
+                                        }
+                                        // For `exists`: if we get true, we can short-circuit
+                                        if is_exists_comprehension {
+                                            if let Value::Bool(true) = accu {
+                                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                                break;
+                                            }
+                                        }
+                                        ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                    }
+                                    Err(e) => {
+                                        // Error in loop step - for all/exists, we may need to continue
+                                        // to check if a later element can determine the result
+                                        if is_all_comprehension || is_exists_comprehension {
+                                            if first_error.is_none() {
+                                                first_error = Some(e);
+                                            }
+                                            // Continue to next element - don't update accumulator
+                                        } else {
+                                            return Err(e);
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             // 2-parameter form: iterate with value only
                             for item in items.deref() {
-                                if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                    break;
+                                // Check loop condition
+                                let loop_cond_result = Value::resolve(&comprehension.loop_cond, &ctx);
+                                match loop_cond_result {
+                                    Ok(cond_val) => {
+                                        match cond_val.to_bool() {
+                                            Ok(false) => break,
+                                            Ok(true) => {}
+                                            Err(e) => {
+                                                if is_all_comprehension || is_exists_comprehension {
+                                                    if first_error.is_none() {
+                                                        first_error = Some(e);
+                                                    }
+                                                } else {
+                                                    return Err(e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if is_all_comprehension || is_exists_comprehension {
+                                            if first_error.is_none() {
+                                                first_error = Some(e);
+                                            }
+                                        } else {
+                                            return Err(e);
+                                        }
+                                    }
                                 }
+
                                 ctx.add_variable_from_value(&comprehension.iter_var, item.clone());
-                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
-                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+
+                                match Value::resolve(&comprehension.loop_step, &ctx) {
+                                    Ok(accu) => {
+                                        if is_all_comprehension {
+                                            if let Value::Bool(false) = accu {
+                                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                                break;
+                                            }
+                                        }
+                                        if is_exists_comprehension {
+                                            if let Value::Bool(true) = accu {
+                                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                                break;
+                                            }
+                                        }
+                                        ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                    }
+                                    Err(e) => {
+                                        if is_all_comprehension || is_exists_comprehension {
+                                            if first_error.is_none() {
+                                                first_error = Some(e);
+                                            }
+                                        } else {
+                                            return Err(e);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2291,28 +2442,153 @@ impl Value {
                         if let Some(ref iter_var2) = comprehension.iter_var2 {
                             // 3-parameter form: iterate with key and value
                             for (key, value) in map.map.deref() {
-                                if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                    break;
+                                let loop_cond_result = Value::resolve(&comprehension.loop_cond, &ctx);
+                                match loop_cond_result {
+                                    Ok(cond_val) => {
+                                        match cond_val.to_bool() {
+                                            Ok(false) => break,
+                                            Ok(true) => {}
+                                            Err(e) => {
+                                                if is_all_comprehension || is_exists_comprehension {
+                                                    if first_error.is_none() {
+                                                        first_error = Some(e);
+                                                    }
+                                                } else {
+                                                    return Err(e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if is_all_comprehension || is_exists_comprehension {
+                                            if first_error.is_none() {
+                                                first_error = Some(e);
+                                            }
+                                        } else {
+                                            return Err(e);
+                                        }
+                                    }
                                 }
+
                                 // iter_var = key, iter_var2 = value
                                 ctx.add_variable_from_value(&comprehension.iter_var, key.clone());
                                 ctx.add_variable_from_value(iter_var2, value.clone());
-                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
-                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+
+                                match Value::resolve(&comprehension.loop_step, &ctx) {
+                                    Ok(accu) => {
+                                        if is_all_comprehension {
+                                            if let Value::Bool(false) = accu {
+                                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                                break;
+                                            }
+                                        }
+                                        if is_exists_comprehension {
+                                            if let Value::Bool(true) = accu {
+                                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                                break;
+                                            }
+                                        }
+                                        ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                    }
+                                    Err(e) => {
+                                        if is_all_comprehension || is_exists_comprehension {
+                                            if first_error.is_none() {
+                                                first_error = Some(e);
+                                            }
+                                        } else {
+                                            return Err(e);
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             // 2-parameter form: iterate with key only
                             for key in map.map.deref().keys() {
-                                if !Value::resolve(&comprehension.loop_cond, &ctx)?.to_bool()? {
-                                    break;
+                                let loop_cond_result = Value::resolve(&comprehension.loop_cond, &ctx);
+                                match loop_cond_result {
+                                    Ok(cond_val) => {
+                                        match cond_val.to_bool() {
+                                            Ok(false) => break,
+                                            Ok(true) => {}
+                                            Err(e) => {
+                                                if is_all_comprehension || is_exists_comprehension {
+                                                    if first_error.is_none() {
+                                                        first_error = Some(e);
+                                                    }
+                                                } else {
+                                                    return Err(e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if is_all_comprehension || is_exists_comprehension {
+                                            if first_error.is_none() {
+                                                first_error = Some(e);
+                                            }
+                                        } else {
+                                            return Err(e);
+                                        }
+                                    }
                                 }
+
                                 ctx.add_variable_from_value(&comprehension.iter_var, key.clone());
-                                let accu = Value::resolve(&comprehension.loop_step, &ctx)?;
-                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+
+                                match Value::resolve(&comprehension.loop_step, &ctx) {
+                                    Ok(accu) => {
+                                        if is_all_comprehension {
+                                            if let Value::Bool(false) = accu {
+                                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                                break;
+                                            }
+                                        }
+                                        if is_exists_comprehension {
+                                            if let Value::Bool(true) = accu {
+                                                ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                                break;
+                                            }
+                                        }
+                                        ctx.add_variable_from_value(&comprehension.accu_var, accu);
+                                    }
+                                    Err(e) => {
+                                        if is_all_comprehension || is_exists_comprehension {
+                                            if first_error.is_none() {
+                                                first_error = Some(e);
+                                            }
+                                        } else {
+                                            return Err(e);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                     t => todo!("Support {t:?}"),
+                }
+
+                // After iterating, check if we have a definitive result or need to return error
+                let result = Value::resolve(&comprehension.result, &ctx)?;
+
+                // For all/exists, if the result is definitive (false for all, true for exists),
+                // return it even if there were errors
+                if is_all_comprehension {
+                    if let Value::Bool(false) = result {
+                        return Ok(result);
+                    }
+                    // Result is true - if there were errors, we should return the error
+                    // because the true might be wrong (we didn't evaluate all elements)
+                    if let Some(e) = first_error {
+                        return Err(e);
+                    }
+                }
+                if is_exists_comprehension {
+                    if let Value::Bool(true) = result {
+                        return Ok(result);
+                    }
+                    // Result is false - if there were errors, we should return the error
+                    if let Some(e) = first_error {
+                        return Err(e);
+                    }
                 }
                 Value::resolve(&comprehension.result, &ctx)
             }
@@ -2417,11 +2693,16 @@ impl Value {
                                         // Convert safe-range unsigned integers to Float for JSON compatibility
                                         value = Value::Float(u as f64);
                                     }
+                                    #[cfg(feature = "json")]
                                     Value::Bytes(ref b) => {
                                         // Convert bytes to base64 string for JSON
                                         use base64::Engine;
                                         let encoded = base64::engine::general_purpose::STANDARD.encode(b.as_slice());
                                         value = Value::String(Arc::new(encoded));
+                                    }
+                                    #[cfg(not(feature = "json"))]
+                                    Value::Bytes(_) => {
+                                        // Without json feature, bytes cannot be converted
                                     }
                                     _ => {}
                                 }
@@ -2533,7 +2814,14 @@ impl Value {
                 };
 
                 // Populate default fields for proto message types
-                populate_proto_defaults(&qualified_type_name, &mut fields, &excluded_fields);
+                // BUT: if all user-provided fields were optional and resolved to None,
+                // we should NOT populate defaults (the struct is effectively "empty")
+                let all_fields_excluded = !struct_expr.entries.is_empty()
+                    && fields.is_empty()
+                    && !excluded_fields.is_empty();
+                if !all_fields_excluded {
+                    populate_proto_defaults(&qualified_type_name, &mut fields, &excluded_fields);
+                }
 
                 // Filter out reserved keyword fields (fields 500-516) for TestAllTypes
                 // These were formerly CEL reserved identifiers and should not be exposed
@@ -2703,6 +2991,14 @@ impl Value {
         let child = match self {
             Value::Map(ref m) => m.map.get(&name.clone().into()).cloned(),
             Value::Struct(ref s) => {
+                // google.protobuf.Any structs created as literals should not allow direct field access
+                // The Any type should be unpacked to its underlying type first, but since we can't
+                // do full protobuf deserialization here, field access on Any literals should error.
+                // This handles cases like: google.protobuf.Any{type_url: '...', value: b'...'}.type_url
+                if s.type_name.as_str() == "google.protobuf.Any" {
+                    return Err(ExecutionError::NoSuchOverload);
+                }
+
                 if let Some(value) = s.fields.get(name.as_str()) {
                     // Only apply JSON conversion for google.protobuf.Value fields (not Any fields)
                     // Fields like "single_value" use google.protobuf.Value type

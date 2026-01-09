@@ -583,7 +583,7 @@ mod tests {
             ("\"Hello \\\\\"", Ok(String::from("Hello \\"))),
             ("\"Hello \\?\"", Ok(String::from("Hello ?"))),
             ("\"Hello \\\"\"", Ok(String::from("Hello \""))),
-            ("\"Hello \\'\"", Ok(String::from("Hello \\'"))),
+            ("\"Hello \\'\"", Ok(String::from("Hello '"))),
             ("\"Hello \\`\"", Ok(String::from("Hello `"))),
             ("\"Hello \\x20 \"", Ok(String::from("Hello   "))),
             ("\"Hello \\x60\"", Ok(String::from("Hello `"))),

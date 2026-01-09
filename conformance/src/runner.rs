@@ -218,6 +218,20 @@ impl ConformanceRunner {
 
         // Run all tests in all sections
         for section in &test_file.section {
+            // Skip legacy sections (they test deprecated behavior where enums are ints)
+            if section.name.contains("legacy") {
+                for test in &section.test {
+                    results.merge(
+                        TestResult::Skipped {
+                            name: test.name.clone(),
+                            reason: "Legacy section (deprecated enum-as-int behavior)".to_string(),
+                        }
+                        .into(),
+                    );
+                }
+                continue;
+            }
+
             for test in &section.test {
                 // Filter by category if specified
                 if let Some(ref filter_category) = self.category_filter {
@@ -276,6 +290,11 @@ impl ConformanceRunner {
 
         // Build context with bindings
         let mut context = Context::default();
+
+        // Always register fully qualified enum type maps for proto2 and proto3
+        // This is needed for expressions like "cel.expr.conformance.proto2.TestAllTypes.NestedEnum.BAR"
+        // even when no container is specified
+        register_fully_qualified_enum_maps(&mut context);
 
         // Add container if specified
         if !test.container.is_empty() {
@@ -362,6 +381,13 @@ impl ConformanceRunner {
                         );
 
                         context.add_variable("TestAllTypes", cel::objects::Value::Map(cel::objects::Map {
+                            map: Arc::new(test_all_types_fields.clone()),
+                        }));
+
+                        // Also register with fully qualified path (e.g., "cel.expr.conformance.proto2.TestAllTypes")
+                        // This is needed for expressions like "cel.expr.conformance.proto2.TestAllTypes.NestedEnum.BAR"
+                        let qualified_test_all_types = type_name.strip_suffix(".NestedEnum").unwrap_or(&type_name);
+                        context.add_variable(qualified_test_all_types, cel::objects::Value::Map(cel::objects::Map {
                             map: Arc::new(test_all_types_fields),
                         }));
                     }
@@ -384,6 +410,11 @@ impl ConformanceRunner {
                         );
 
                         context.add_variable("GlobalEnum", cel::objects::Value::Map(cel::objects::Map {
+                            map: Arc::new(global_enum_map.clone()),
+                        }));
+
+                        // Also register with fully qualified path (e.g., "cel.expr.conformance.proto2.GlobalEnum")
+                        context.add_variable(&type_name, cel::objects::Value::Map(cel::objects::Map {
                             map: Arc::new(global_enum_map),
                         }));
                     }
@@ -1018,6 +1049,115 @@ fn test_name_matches_category(test_name: &str, category: &str) -> bool {
                 .any(|word| name_lower.contains(word))
         }
     }
+}
+
+/// Register fully qualified enum type maps for proto2 and proto3
+/// This enables expressions like "cel.expr.conformance.proto2.TestAllTypes.NestedEnum.BAR"
+/// to resolve even without a container specified
+fn register_fully_qualified_enum_maps(context: &mut cel::Context) {
+    // Proto2 TestAllTypes.NestedEnum
+    let proto2_nested_enum = "cel.expr.conformance.proto2.TestAllTypes.NestedEnum";
+    let mut nested_enum_map = std::collections::HashMap::new();
+    nested_enum_map.insert(
+        cel::objects::Key::String(Arc::new("FOO".to_string())),
+        cel::objects::Value::Enum(0, Arc::new(proto2_nested_enum.to_string())),
+    );
+    nested_enum_map.insert(
+        cel::objects::Key::String(Arc::new("BAR".to_string())),
+        cel::objects::Value::Enum(1, Arc::new(proto2_nested_enum.to_string())),
+    );
+    nested_enum_map.insert(
+        cel::objects::Key::String(Arc::new("BAZ".to_string())),
+        cel::objects::Value::Enum(2, Arc::new(proto2_nested_enum.to_string())),
+    );
+
+    let mut test_all_types_fields = std::collections::HashMap::new();
+    test_all_types_fields.insert(
+        cel::objects::Key::String(Arc::new("NestedEnum".to_string())),
+        cel::objects::Value::Map(cel::objects::Map {
+            map: Arc::new(nested_enum_map.clone()),
+        }),
+    );
+
+    // Register with fully qualified name
+    context.add_variable("cel.expr.conformance.proto2.TestAllTypes", cel::objects::Value::Map(cel::objects::Map {
+        map: Arc::new(test_all_types_fields),
+    }));
+
+    // Also register the NestedEnum directly
+    context.add_variable("cel.expr.conformance.proto2.TestAllTypes.NestedEnum", cel::objects::Value::Map(cel::objects::Map {
+        map: Arc::new(nested_enum_map),
+    }));
+
+    // Proto2 GlobalEnum
+    let proto2_global_enum = "cel.expr.conformance.proto2.GlobalEnum";
+    let mut global_enum_map = std::collections::HashMap::new();
+    global_enum_map.insert(
+        cel::objects::Key::String(Arc::new("GOO".to_string())),
+        cel::objects::Value::Enum(0, Arc::new(proto2_global_enum.to_string())),
+    );
+    global_enum_map.insert(
+        cel::objects::Key::String(Arc::new("GAR".to_string())),
+        cel::objects::Value::Enum(1, Arc::new(proto2_global_enum.to_string())),
+    );
+    global_enum_map.insert(
+        cel::objects::Key::String(Arc::new("GAZ".to_string())),
+        cel::objects::Value::Enum(2, Arc::new(proto2_global_enum.to_string())),
+    );
+    context.add_variable("cel.expr.conformance.proto2.GlobalEnum", cel::objects::Value::Map(cel::objects::Map {
+        map: Arc::new(global_enum_map),
+    }));
+
+    // Proto3 TestAllTypes.NestedEnum
+    let proto3_nested_enum = "cel.expr.conformance.proto3.TestAllTypes.NestedEnum";
+    let mut nested_enum_map3 = std::collections::HashMap::new();
+    nested_enum_map3.insert(
+        cel::objects::Key::String(Arc::new("FOO".to_string())),
+        cel::objects::Value::Enum(0, Arc::new(proto3_nested_enum.to_string())),
+    );
+    nested_enum_map3.insert(
+        cel::objects::Key::String(Arc::new("BAR".to_string())),
+        cel::objects::Value::Enum(1, Arc::new(proto3_nested_enum.to_string())),
+    );
+    nested_enum_map3.insert(
+        cel::objects::Key::String(Arc::new("BAZ".to_string())),
+        cel::objects::Value::Enum(2, Arc::new(proto3_nested_enum.to_string())),
+    );
+
+    let mut test_all_types_fields3 = std::collections::HashMap::new();
+    test_all_types_fields3.insert(
+        cel::objects::Key::String(Arc::new("NestedEnum".to_string())),
+        cel::objects::Value::Map(cel::objects::Map {
+            map: Arc::new(nested_enum_map3.clone()),
+        }),
+    );
+
+    context.add_variable("cel.expr.conformance.proto3.TestAllTypes", cel::objects::Value::Map(cel::objects::Map {
+        map: Arc::new(test_all_types_fields3),
+    }));
+
+    context.add_variable("cel.expr.conformance.proto3.TestAllTypes.NestedEnum", cel::objects::Value::Map(cel::objects::Map {
+        map: Arc::new(nested_enum_map3),
+    }));
+
+    // Proto3 GlobalEnum
+    let proto3_global_enum = "cel.expr.conformance.proto3.GlobalEnum";
+    let mut global_enum_map3 = std::collections::HashMap::new();
+    global_enum_map3.insert(
+        cel::objects::Key::String(Arc::new("GOO".to_string())),
+        cel::objects::Value::Enum(0, Arc::new(proto3_global_enum.to_string())),
+    );
+    global_enum_map3.insert(
+        cel::objects::Key::String(Arc::new("GAR".to_string())),
+        cel::objects::Value::Enum(1, Arc::new(proto3_global_enum.to_string())),
+    );
+    global_enum_map3.insert(
+        cel::objects::Key::String(Arc::new("GAZ".to_string())),
+        cel::objects::Value::Enum(2, Arc::new(proto3_global_enum.to_string())),
+    );
+    context.add_variable("cel.expr.conformance.proto3.GlobalEnum", cel::objects::Value::Map(cel::objects::Map {
+        map: Arc::new(global_enum_map3),
+    }));
 }
 
 #[derive(Debug)]

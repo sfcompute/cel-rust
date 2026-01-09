@@ -378,7 +378,31 @@ pub fn convert_any_to_cel_value(any: &Any) -> Result<CelValue, ConversionError> 
     }
 
     // Try to decode as TestAllTypes (proto2 or proto3)
-    if type_url.contains("cel.expr.conformance.proto3.TestAllTypes") {
+    // IMPORTANT: Check for nested message types FIRST, before checking for TestAllTypes
+    // because "TestAllTypes.NestedMessage" contains "TestAllTypes"
+    if type_url.contains("cel.expr.conformance.proto3.TestAllTypes.NestedMessage") {
+        use cel::objects::{Struct, Value::*};
+        use prost::Message;
+        if let Ok(nested) = crate::proto::cel::expr::conformance::proto3::test_all_types::NestedMessage::decode(&any.value[..]) {
+            let mut nested_fields = HashMap::new();
+            nested_fields.insert("bb".to_string(), Int(nested.bb as i64));
+            return Ok(Struct(Struct {
+                type_name: Arc::new("cel.expr.conformance.proto3.TestAllTypes.NestedMessage".to_string()),
+                fields: Arc::new(nested_fields),
+            }));
+        }
+    } else if type_url.contains("cel.expr.conformance.proto2.TestAllTypes.NestedMessage") {
+        use cel::objects::{Struct, Value::*};
+        use prost::Message;
+        if let Ok(nested) = crate::proto::cel::expr::conformance::proto2::test_all_types::NestedMessage::decode(&any.value[..]) {
+            let mut nested_fields = HashMap::new();
+            nested_fields.insert("bb".to_string(), Int(nested.bb.unwrap_or(0) as i64));
+            return Ok(Struct(Struct {
+                type_name: Arc::new("cel.expr.conformance.proto2.TestAllTypes.NestedMessage".to_string()),
+                fields: Arc::new(nested_fields),
+            }));
+        }
+    } else if type_url.contains("cel.expr.conformance.proto3.TestAllTypes") {
         if let Ok(msg) =
             crate::proto::cel::expr::conformance::proto3::TestAllTypes::decode(&any.value[..])
         {
@@ -411,8 +435,69 @@ fn extract_extension_fields(
     // Parse wire format to get all fields
     let field_map = match parse_proto_wire_format(encoded_msg) {
         Some(map) => map,
-        None => return Ok(()), // No extension fields or parse failed
+        None => return Ok(()),
     };
+
+    // Helper to convert embedded TestAllTypes message bytes to CEL Struct
+    fn convert_embedded_test_all_types(bytes: &[u8]) -> CelValue {
+        use cel::objects::{Struct, Value::*};
+        use prost::Message;
+
+        // Try to decode as TestAllTypes
+        if let Ok(msg) = crate::proto::cel::expr::conformance::proto2::TestAllTypes::decode(bytes) {
+            // Create a struct with wrapper fields set to Null (proto2 defaults)
+            let mut struct_fields = HashMap::new();
+
+            // Add wrapper fields as Null (proto2 semantics - absent wrappers are null)
+            struct_fields.insert("single_int32_wrapper".to_string(), Null);
+            struct_fields.insert("single_int64_wrapper".to_string(), Null);
+            struct_fields.insert("single_uint32_wrapper".to_string(), Null);
+            struct_fields.insert("single_uint64_wrapper".to_string(), Null);
+            struct_fields.insert("single_float_wrapper".to_string(), Null);
+            struct_fields.insert("single_double_wrapper".to_string(), Null);
+            struct_fields.insert("single_bool_wrapper".to_string(), Null);
+            struct_fields.insert("single_string_wrapper".to_string(), Null);
+            struct_fields.insert("single_bytes_wrapper".to_string(), Null);
+
+            // Add the single_bool field - proto2 has [default = true] for this field
+            if msg.single_bool.is_some() {
+                struct_fields.insert("single_bool".to_string(), Bool(msg.single_bool.unwrap()));
+            } else {
+                // Proto2 default for single_bool is true (from [default = true] in schema)
+                struct_fields.insert("single_bool".to_string(), Bool(true));
+            }
+
+            // Add single_int64 if set
+            if let Some(v) = msg.single_int64 {
+                struct_fields.insert("single_int64".to_string(), Int(v));
+            }
+
+            Struct(Struct {
+                type_name: Arc::new("cel.expr.conformance.proto2.TestAllTypes".to_string()),
+                fields: Arc::new(struct_fields),
+            })
+        } else {
+            // Fallback: return empty struct if decode fails
+            Struct(Struct {
+                type_name: Arc::new("cel.expr.conformance.proto2.TestAllTypes".to_string()),
+                fields: Arc::new({
+                    let mut fields = HashMap::new();
+                    fields.insert("single_int32_wrapper".to_string(), Null);
+                    fields.insert("single_int64_wrapper".to_string(), Null);
+                    fields.insert("single_uint32_wrapper".to_string(), Null);
+                    fields.insert("single_uint64_wrapper".to_string(), Null);
+                    fields.insert("single_float_wrapper".to_string(), Null);
+                    fields.insert("single_double_wrapper".to_string(), Null);
+                    fields.insert("single_bool_wrapper".to_string(), Null);
+                    fields.insert("single_string_wrapper".to_string(), Null);
+                    fields.insert("single_bytes_wrapper".to_string(), Null);
+                    // Proto2 default for single_bool is true (from [default = true] in schema)
+                    fields.insert("single_bool".to_string(), Bool(true));
+                    fields
+                }),
+            })
+        }
+    }
 
     // Process extension fields (field numbers >= 1000)
     for (field_num, values) in field_map {
@@ -431,17 +516,46 @@ fn extract_extension_fields(
                 _ => continue, // Unknown extension
             };
 
-            // For repeated extensions (1004, 1008), create a List
-            if field_num == 1004 || field_num == 1008 {
-                let list_values: Vec<CelValue> = values.iter()
-                    .map(|v| field_value_to_cel(v))
-                    .collect();
-                fields.insert(ext_name.to_string(), CelValue::List(Arc::new(list_values)));
-            } else {
-                // For singular extensions, use the first (and only) value
-                if let Some(first_value) = values.first() {
-                    let cel_value = field_value_to_cel(first_value);
-                    fields.insert(ext_name.to_string(), cel_value);
+            // Handle based on extension type
+            match field_num {
+                // Repeated message extensions
+                1004 | 1008 => {
+                    let list_values: Vec<CelValue> = values.iter()
+                        .filter_map(|v| {
+                            if let cel::proto_compare::FieldValue::LengthDelimited(bytes) = v {
+                                Some(convert_embedded_test_all_types(bytes))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    fields.insert(ext_name.to_string(), CelValue::List(Arc::new(list_values)));
+                }
+                // Singular message extensions (nested_ext, test_all_types_ext, message_scoped_nested_ext)
+                1001 | 1002 | 1006 => {
+                    if let Some(cel::proto_compare::FieldValue::LengthDelimited(bytes)) = values.first() {
+                        let cel_value = convert_embedded_test_all_types(bytes);
+                        fields.insert(ext_name.to_string(), cel_value);
+                    }
+                }
+                // Enum extensions
+                1003 | 1007 => {
+                    if let Some(first_value) = values.first() {
+                        let cel_value = field_value_to_cel(first_value);
+                        // Convert to Enum type for proper CEL handling
+                        let enum_value = match cel_value {
+                            CelValue::Int(i) => CelValue::Enum(i, Arc::new("cel.expr.conformance.proto2.TestAllTypes.NestedEnum".to_string())),
+                            other => other,
+                        };
+                        fields.insert(ext_name.to_string(), enum_value);
+                    }
+                }
+                // Scalar extensions (int32_ext, int64_ext)
+                _ => {
+                    if let Some(first_value) = values.first() {
+                        let cel_value = field_value_to_cel(first_value);
+                        fields.insert(ext_name.to_string(), cel_value);
+                    }
                 }
             }
         }

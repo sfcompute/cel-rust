@@ -354,8 +354,8 @@ pub fn type_(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
             // Clone the type name to avoid lifetime issues
             return Ok(Value::String(s.type_name.clone()));
         }
-        // Enum values have type "int" in CEL
-        Value::Enum(_, _) => "int",
+        // Enum values should return their qualified type name
+        Value::Enum(_, type_name) => return Ok(Value::String(type_name.clone())),
         Value::Namespace(_) => "string",
         #[cfg(feature = "chrono")]
         Value::Timestamp(_) => "google.protobuf.Timestamp",
@@ -468,8 +468,8 @@ pub fn type_of(This(this): This<Value>) -> Result<Value> {
         #[cfg(feature = "chrono")]
         Value::Duration(_) => "google.protobuf.Duration",
         Value::Struct(_) => "map", // Structs are treated as maps in CEL
-        // Enum values have type "int" in CEL
-        Value::Enum(_, _) => "int",
+        // Enum values should return their qualified type name
+        Value::Enum(_, type_name) => return Ok(Value::String(type_name.clone())),
         Value::Function(_, _) => "function",
         Value::Opaque(o) => {
             if o.runtime_type_name() == "optional_type" {
@@ -1288,7 +1288,7 @@ pub use time::timestamp;
 #[cfg(feature = "chrono")]
 pub mod time {
     use super::{FunctionContext, Result};
-    use crate::magic::This;
+    use crate::magic::{Arguments, This};
     use crate::{ExecutionError, Value};
     use chrono::{Datelike, Days, Months, Timelike};
     use std::sync::Arc;
@@ -1444,86 +1444,219 @@ pub mod time {
     }
 
     pub fn timestamp_year(
-        This(this): This<chrono::DateTime<chrono::FixedOffset>>,
+        _ftx: &FunctionContext,
+        This(this): This<Value>,
+        Arguments(args): Arguments,
     ) -> Result<Value> {
-        Ok(this.year().into())
+        let ts = extract_timestamp(this)?;
+        if args.is_empty() {
+            Ok(ts.year().into())
+        } else if args.len() == 1 {
+            if let Value::String(tz) = &args[0] {
+                let dt = apply_timezone(ts, tz.as_str())?;
+                Ok(dt.year().into())
+            } else {
+                Err(ExecutionError::function_error("getFullYear", "timezone argument must be a string"))
+            }
+        } else {
+            Err(ExecutionError::function_error("getFullYear", "expected 0 or 1 arguments"))
+        }
     }
 
     pub fn timestamp_month(
-        This(this): This<chrono::DateTime<chrono::FixedOffset>>,
+        _ftx: &FunctionContext,
+        This(this): This<Value>,
+        Arguments(args): Arguments,
     ) -> Result<Value> {
-        Ok((this.month0() as i32).into())
+        let ts = extract_timestamp(this)?;
+        if args.is_empty() {
+            Ok((ts.month0() as i32).into())
+        } else if args.len() == 1 {
+            if let Value::String(tz) = &args[0] {
+                let dt = apply_timezone(ts, tz.as_str())?;
+                Ok((dt.month0() as i32).into())
+            } else {
+                Err(ExecutionError::function_error("getMonth", "timezone argument must be a string"))
+            }
+        } else {
+            Err(ExecutionError::function_error("getMonth", "expected 0 or 1 arguments"))
+        }
     }
 
     pub fn timestamp_year_day(
-        This(this): This<chrono::DateTime<chrono::FixedOffset>>,
+        _ftx: &FunctionContext,
+        This(this): This<Value>,
+        Arguments(args): Arguments,
     ) -> Result<Value> {
-        let year = this
-            .checked_sub_days(Days::new(this.day0() as u64))
-            .unwrap()
-            .checked_sub_months(Months::new(this.month0()))
-            .unwrap();
-        Ok(this.signed_duration_since(year).num_days().into())
+        let ts = extract_timestamp(this)?;
+        if args.is_empty() {
+            let year = ts
+                .checked_sub_days(Days::new(ts.day0() as u64))
+                .unwrap()
+                .checked_sub_months(Months::new(ts.month0()))
+                .unwrap();
+            Ok(ts.signed_duration_since(year).num_days().into())
+        } else if args.len() == 1 {
+            if let Value::String(tz) = &args[0] {
+                let dt = apply_timezone(ts, tz.as_str())?;
+                let year = dt.checked_sub_days(Days::new(dt.day0() as u64)).unwrap().checked_sub_months(Months::new(dt.month0())).unwrap();
+                Ok(dt.signed_duration_since(year).num_days().into())
+            } else {
+                Err(ExecutionError::function_error("getDayOfYear", "timezone argument must be a string"))
+            }
+        } else {
+            Err(ExecutionError::function_error("getDayOfYear", "expected 0 or 1 arguments"))
+        }
     }
 
     pub fn timestamp_month_day(
-        This(this): This<chrono::DateTime<chrono::FixedOffset>>,
+        _ftx: &FunctionContext,
+        This(this): This<Value>,
+        Arguments(args): Arguments,
     ) -> Result<Value> {
-        Ok((this.day0() as i32).into())
+        let ts = extract_timestamp(this)?;
+        if args.is_empty() {
+            Ok((ts.day0() as i32).into())
+        } else if args.len() == 1 {
+            if let Value::String(tz) = &args[0] {
+                let dt = apply_timezone(ts, tz.as_str())?;
+                Ok((dt.day0() as i32).into())
+            } else {
+                Err(ExecutionError::function_error("getDayOfMonth", "timezone argument must be a string"))
+            }
+        } else {
+            Err(ExecutionError::function_error("getDayOfMonth", "expected 0 or 1 arguments"))
+        }
     }
 
     pub fn timestamp_date(
-        This(this): This<chrono::DateTime<chrono::FixedOffset>>,
+        _ftx: &FunctionContext,
+        This(this): This<Value>,
+        Arguments(args): Arguments,
     ) -> Result<Value> {
-        Ok((this.day() as i32).into())
+        let ts = extract_timestamp(this)?;
+        if args.is_empty() {
+            Ok((ts.day() as i32).into())
+        } else if args.len() == 1 {
+            if let Value::String(tz) = &args[0] {
+                let dt = apply_timezone(ts, tz.as_str())?;
+                Ok((dt.day() as i32).into())
+            } else {
+                Err(ExecutionError::function_error("getDate", "timezone argument must be a string"))
+            }
+        } else {
+            Err(ExecutionError::function_error("getDate", "expected 0 or 1 arguments"))
+        }
     }
 
     pub fn timestamp_weekday(
-        This(this): This<chrono::DateTime<chrono::FixedOffset>>,
+        _ftx: &FunctionContext,
+        This(this): This<Value>,
+        Arguments(args): Arguments,
     ) -> Result<Value> {
-        Ok((this.weekday().num_days_from_sunday() as i32).into())
+        let ts = extract_timestamp(this)?;
+        if args.is_empty() {
+            Ok((ts.weekday().num_days_from_sunday() as i32).into())
+        } else if args.len() == 1 {
+            if let Value::String(tz) = &args[0] {
+                let dt = apply_timezone(ts, tz.as_str())?;
+                Ok((dt.weekday().num_days_from_sunday() as i32).into())
+            } else {
+                Err(ExecutionError::function_error("getDayOfWeek", "timezone argument must be a string"))
+            }
+        } else {
+            Err(ExecutionError::function_error("getDayOfWeek", "expected 0 or 1 arguments"))
+        }
     }
 
     /// Extract hours from a timestamp or total hours from a duration
-    pub fn get_hours(This(this): This<Value>) -> Result<Value> {
-        match this {
-            Value::Timestamp(timestamp) => Ok((timestamp.hour() as i32).into()),
-            Value::Duration(duration) => Ok(Value::Int(duration.num_hours())),
-            _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
+    pub fn get_hours(_ftx: &FunctionContext, This(this): This<Value>, Arguments(args): Arguments) -> Result<Value> {
+        if args.is_empty() {
+            match this {
+                Value::Timestamp(timestamp) => Ok((timestamp.hour() as i32).into()),
+                Value::Duration(duration) => Ok(Value::Int(duration.num_hours())),
+                _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
+            }
+        } else if args.len() == 1 {
+            let ts = extract_timestamp(this)?;
+            if let Value::String(tz) = &args[0] {
+                let dt = apply_timezone(ts, tz.as_str())?;
+                Ok((dt.hour() as i32).into())
+            } else {
+                Err(ExecutionError::function_error("getHours", "timezone argument must be a string"))
+            }
+        } else {
+            Err(ExecutionError::function_error("getHours", "expected 0 or 1 arguments"))
         }
     }
 
     /// Extract minutes from a timestamp or total minutes from a duration
-    pub fn get_minutes(This(this): This<Value>) -> Result<Value> {
-        match this {
-            Value::Timestamp(timestamp) => Ok((timestamp.minute() as i32).into()),
-            Value::Duration(duration) => Ok(Value::Int(duration.num_minutes())),
-            _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
+    pub fn get_minutes(_ftx: &FunctionContext, This(this): This<Value>, Arguments(args): Arguments) -> Result<Value> {
+        if args.is_empty() {
+            match this {
+                Value::Timestamp(timestamp) => Ok((timestamp.minute() as i32).into()),
+                Value::Duration(duration) => Ok(Value::Int(duration.num_minutes())),
+                _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
+            }
+        } else if args.len() == 1 {
+            let ts = extract_timestamp(this)?;
+            if let Value::String(tz) = &args[0] {
+                let dt = apply_timezone(ts, tz.as_str())?;
+                Ok((dt.minute() as i32).into())
+            } else {
+                Err(ExecutionError::function_error("getMinutes", "timezone argument must be a string"))
+            }
+        } else {
+            Err(ExecutionError::function_error("getMinutes", "expected 0 or 1 arguments"))
         }
     }
 
     /// Extract seconds from a timestamp or total seconds from a duration
-    pub fn get_seconds(This(this): This<Value>) -> Result<Value> {
-        match this {
-            Value::Timestamp(timestamp) => Ok((timestamp.second() as i32).into()),
-            Value::Duration(duration) => Ok(Value::Int(duration.num_seconds())),
-            _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
+    pub fn get_seconds(_ftx: &FunctionContext, This(this): This<Value>, Arguments(args): Arguments) -> Result<Value> {
+        if args.is_empty() {
+            match this {
+                Value::Timestamp(timestamp) => Ok((timestamp.second() as i32).into()),
+                Value::Duration(duration) => Ok(Value::Int(duration.num_seconds())),
+                _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
+            }
+        } else if args.len() == 1 {
+            let ts = extract_timestamp(this)?;
+            if let Value::String(tz) = &args[0] {
+                let dt = apply_timezone(ts, tz.as_str())?;
+                Ok((dt.second() as i32).into())
+            } else {
+                Err(ExecutionError::function_error("getSeconds", "timezone argument must be a string"))
+            }
+        } else {
+            Err(ExecutionError::function_error("getSeconds", "expected 0 or 1 arguments"))
         }
     }
 
-    pub fn get_milliseconds(_ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
-        match this {
-            Value::Timestamp(timestamp) => {
-                Ok((timestamp.timestamp_subsec_millis() as i32).into())
+    pub fn get_milliseconds(_ftx: &FunctionContext, This(this): This<Value>, Arguments(args): Arguments) -> Result<Value> {
+        if args.is_empty() {
+            match this {
+                Value::Timestamp(timestamp) => {
+                    Ok((timestamp.timestamp_subsec_millis() as i32).into())
+                }
+                Value::Duration(duration) => {
+                    // Get the milliseconds component of the duration (not the total milliseconds)
+                    // This extracts the milliseconds from the subsecond portion
+                    let nanos = duration.num_nanoseconds().unwrap_or(0);
+                    let millis = (nanos.abs() / 1_000_000) % 1000;
+                    Ok(millis.into())
+                }
+                _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
             }
-            Value::Duration(duration) => {
-                // Get the milliseconds component of the duration (not the total milliseconds)
-                // This extracts the milliseconds from the subsecond portion
-                let nanos = duration.num_nanoseconds().unwrap_or(0);
-                let millis = (nanos.abs() / 1_000_000) % 1000;
-                Ok(millis.into())
+        } else if args.len() == 1 {
+            let ts = extract_timestamp(this)?;
+            if let Value::String(tz) = &args[0] {
+                let dt = apply_timezone(ts, tz.as_str())?;
+                Ok((dt.timestamp_subsec_millis() as i32).into())
+            } else {
+                Err(ExecutionError::function_error("getMilliseconds", "timezone argument must be a string"))
             }
-            _ => Err(ExecutionError::UnsupportedTargetType { target: this }),
+        } else {
+            Err(ExecutionError::function_error("getMilliseconds", "expected 0 or 1 arguments"))
         }
     }
 
@@ -1566,7 +1699,7 @@ pub mod time {
         let tz: chrono_tz::Tz = tz_str.parse().map_err(|_| ExecutionError::function_error("timezone", format!("unknown timezone: {}", tz_str)))?;
         let dt_in_tz = timestamp.with_timezone(&tz);
         let fixed_offset = dt_in_tz.offset().fix();
-        Ok(timestamp.with_timezone(&fixed_offset))
+        Ok(dt_in_tz.with_timezone(&fixed_offset))
     }
 
     /// Helper to extract timestamp from Value
@@ -1577,66 +1710,6 @@ pub mod time {
         }
     }
 
-    pub fn timestamp_year_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
-        let ts = extract_timestamp(this)?;
-        let dt = apply_timezone(ts, tz.as_str())?;
-        Ok(dt.year().into())
-    }
-
-    pub fn timestamp_month_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
-        let ts = extract_timestamp(this)?;
-        let dt = apply_timezone(ts, tz.as_str())?;
-        Ok((dt.month0() as i32).into())
-    }
-
-    pub fn timestamp_year_day_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
-        let ts = extract_timestamp(this)?;
-        let dt = apply_timezone(ts, tz.as_str())?;
-        let year = dt.checked_sub_days(Days::new(dt.day0() as u64)).unwrap().checked_sub_months(Months::new(dt.month0())).unwrap();
-        Ok(dt.signed_duration_since(year).num_days().into())
-    }
-
-    pub fn timestamp_month_day_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
-        let ts = extract_timestamp(this)?;
-        let dt = apply_timezone(ts, tz.as_str())?;
-        Ok((dt.day0() as i32).into())
-    }
-
-    pub fn timestamp_date_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
-        let ts = extract_timestamp(this)?;
-        let dt = apply_timezone(ts, tz.as_str())?;
-        Ok((dt.day() as i32).into())
-    }
-
-    pub fn timestamp_weekday_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
-        let ts = extract_timestamp(this)?;
-        let dt = apply_timezone(ts, tz.as_str())?;
-        Ok((dt.weekday().num_days_from_sunday() as i32).into())
-    }
-
-    pub fn get_hours_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
-        let ts = extract_timestamp(this)?;
-        let dt = apply_timezone(ts, tz.as_str())?;
-        Ok((dt.hour() as i32).into())
-    }
-
-    pub fn get_minutes_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
-        let ts = extract_timestamp(this)?;
-        let dt = apply_timezone(ts, tz.as_str())?;
-        Ok((dt.minute() as i32).into())
-    }
-
-    pub fn get_seconds_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
-        let ts = extract_timestamp(this)?;
-        let dt = apply_timezone(ts, tz.as_str())?;
-        Ok((dt.second() as i32).into())
-    }
-
-    pub fn get_milliseconds_tz(This(this): This<Value>, tz: Arc<String>) -> Result<Value> {
-        let ts = extract_timestamp(this)?;
-        let dt = apply_timezone(ts, tz.as_str())?;
-        Ok((dt.timestamp_subsec_millis() as i32).into())
-    }
 }
 
 /// Proto extension functions for hasExt and getExt
@@ -2766,7 +2839,7 @@ mod tests {
             ),
             (
                 "timestamp string",
-                "timestamp('2023-05-28T00:00:00Z').string() == '2023-05-28T00:00:00+00:00'",
+                "timestamp('2023-05-28T00:00:00Z').string() == '2023-05-28T00:00:00Z'",
             ),
             (
                 "timestamp getFullYear",
@@ -2816,12 +2889,12 @@ mod tests {
             (
                 "timestamp out of range",
                 "timestamp('0000-01-00T00:00:00Z')",
-                "Error executing function 'timestamp': input is out of range",
+                "Error executing function 'timestamp': timestamp parse error: input is out of range",
             ),
             (
                 "timestamp out of range",
                 "timestamp('9999-12-32T23:59:59.999999999Z')",
-                "Error executing function 'timestamp': input is out of range",
+                "Error executing function 'timestamp': timestamp parse error: input is out of range",
             ),
             (
                 "timestamp overflow",
@@ -2899,10 +2972,10 @@ mod tests {
     #[test]
     fn test_chrono_string() {
         [
-            ("duration", "duration('1h30m').string() == '1h30m0s'"),
+            ("duration", "duration('1h30m').string() == '5400s'"),
             (
                 "timestamp",
-                "timestamp('2023-05-29T00:00:00Z').string() == '2023-05-29T00:00:00+00:00'",
+                "timestamp('2023-05-29T00:00:00Z').string() == '2023-05-29T00:00:00Z'",
             ),
         ]
         .iter()
@@ -3016,13 +3089,13 @@ mod tests {
     #[test]
     fn no_bool_coercion() {
         [
-            ("string || bool", "'' || false", "No such overload"),
-            ("int || bool", "1 || false", "No such overload"),
-            ("int || bool", "1u || false", "No such overload"),
-            ("float || bool", "0.1|| false", "No such overload"),
-            ("list || bool", "[] || false", "No such overload"),
-            ("map || bool", "{} || false", "No such overload"),
-            ("null || bool", "null || false", "No such overload"),
+            ("string || bool", "'' || false", "no_such_overload"),
+            ("int || bool", "1 || false", "no_such_overload"),
+            ("int || bool", "1u || false", "no_such_overload"),
+            ("float || bool", "0.1|| false", "no_such_overload"),
+            ("list || bool", "[] || false", "no_such_overload"),
+            ("map || bool", "{} || false", "no_such_overload"),
+            ("null || bool", "null || false", "no_such_overload"),
         ]
         .iter()
         .for_each(assert_error)
