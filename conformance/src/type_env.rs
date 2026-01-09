@@ -68,6 +68,7 @@ pub fn proto_type_to_cel_type(proto_type: &Type) -> CelType {
         }
         Some(TypeKind::Error(_)) => CelType::Error,
         Some(TypeKind::Function(func)) => {
+            #[allow(clippy::redundant_closure)] // closure needed for Box<Type> deref coercion
             let result_type = func
                 .result_type
                 .as_ref()
@@ -76,7 +77,7 @@ pub fn proto_type_to_cel_type(proto_type: &Type) -> CelType {
             let arg_types: Vec<CelType> = func
                 .arg_types
                 .iter()
-                .map(|t| proto_type_to_cel_type(t))
+                .map(proto_type_to_cel_type)
                 .collect();
             CelType::Function(arg_types, Box::new(result_type))
         }
@@ -171,9 +172,10 @@ pub fn build_type_env_from_decls(decls: &[Decl], container: &Option<String>) -> 
                     let param_types: Vec<CelType> = overload
                         .params
                         .iter()
-                        .map(|t| proto_type_to_cel_type(t))
+                        .map(proto_type_to_cel_type)
                         .collect();
 
+                    #[allow(clippy::redundant_closure)] // closure needed for Box<Type> deref coercion
                     let result_type = overload
                         .result_type
                         .as_ref()

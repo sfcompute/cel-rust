@@ -1312,7 +1312,9 @@ pub mod time {
     /// - `1.5ms` parses as 1 millisecond and 500 microseconds
     /// - `1ns` parses as 1 nanosecond
     /// - `1.5ns` parses as 1 nanosecond (sub-nanosecond durations not supported)
-    /// Duration function that handles both string and duration arguments
+    ///
+    /// Duration function that handles both string and duration arguments.
+    ///
     /// Overloads:
     /// - duration(string) -> duration
     /// - duration(duration) -> duration (identity)
@@ -1351,7 +1353,7 @@ pub mod time {
         
         // Validate timestamp range according to CEL spec
         let year = parsed.year();
-        if year < 1 || year > 9999 {
+        if !(1..=9999).contains(&year) {
             return Err(ExecutionError::function_error(
                 "timestamp",
                 "range"
@@ -1368,7 +1370,7 @@ pub mod time {
     pub fn timestamp_from_int(ftx: &FunctionContext, This(this): This<Value>) -> Result<Value> {
         match this {
             Value::Int(secs) => {
-                use chrono::{DateTime, FixedOffset, TimeZone};
+                use chrono::{FixedOffset, TimeZone};
                 let ts = FixedOffset::east_opt(0)
                     .unwrap()
                     .timestamp_opt(secs, 0)
@@ -1384,7 +1386,7 @@ pub mod time {
                 
                 // Validate timestamp range according to CEL spec
                 let year = parsed.year();
-                if year < 1 || year > 9999 {
+                if !(1..=9999).contains(&year) {
                     return Err(ftx.error("range"));
                 }
                 
@@ -1670,10 +1672,10 @@ pub mod time {
     fn parse_fixed_offset(tz_str: &str) -> Result<chrono::FixedOffset> {
         use chrono::FixedOffset;
         let tz_trimmed = tz_str.trim();
-        let (sign, offset_str) = if tz_trimmed.starts_with('+') {
-            (1, &tz_trimmed[1..])
-        } else if tz_trimmed.starts_with('-') {
-            (-1, &tz_trimmed[1..])
+        let (sign, offset_str) = if let Some(stripped) = tz_trimmed.strip_prefix('+') {
+            (1, stripped)
+        } else if let Some(stripped) = tz_trimmed.strip_prefix('-') {
+            (-1, stripped)
         } else {
             (1, tz_trimmed)
         };
@@ -1692,7 +1694,7 @@ pub mod time {
     fn apply_timezone(timestamp: chrono::DateTime<chrono::FixedOffset>, tz_str: &str) -> Result<chrono::DateTime<chrono::FixedOffset>> {
         use chrono::Offset;
         let tz_trimmed = tz_str.trim();
-        if tz_trimmed.starts_with('+') || tz_trimmed.starts_with('-') || tz_trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if tz_trimmed.starts_with('+') || tz_trimmed.starts_with('-') || tz_trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             let offset = parse_fixed_offset(tz_str)?;
             return Ok(timestamp.with_timezone(&offset));
         }
@@ -2339,7 +2341,7 @@ pub fn format(ftx: &FunctionContext, This(this): This<Value>, args: Arguments) -
         return Err(ftx.error("too many arguments for format string"));
     }
     
-    Ok(Value::String(Arc::new(std::string::String::from(result))))
+    Ok(Value::String(Arc::new(result)))
 }
 
 /// Validates that a value contains only formattable types (no Structs).
@@ -2501,11 +2503,11 @@ fn format_float(f: f64, precision: usize, scientific: bool) -> std::result::Resu
         // Ensure the exponent has 2 digits and always includes the sign
         if let Some(e_pos) = formatted.find('e') {
             let (mantissa, exp_part) = formatted.split_at(e_pos);
-            let exp_str = if exp_part.starts_with("e+") {
-                let exp_num: i32 = exp_part[2..].parse().unwrap_or(0);
+            let exp_str = if let Some(stripped) = exp_part.strip_prefix("e+") {
+                let exp_num: i32 = stripped.parse().unwrap_or(0);
                 format!("e+{:02}", exp_num)
-            } else if exp_part.starts_with("e-") {
-                let exp_num: i32 = exp_part[2..].parse().unwrap_or(0);
+            } else if let Some(stripped) = exp_part.strip_prefix("e-") {
+                let exp_num: i32 = stripped.parse().unwrap_or(0);
                 format!("e-{:02}", exp_num)
             } else if exp_part.len() > 1 && exp_part[1..].chars().next().unwrap().is_ascii_digit() {
                 // Handle case where Rust omits the + sign (e.g., "e3" instead of "e+03")
@@ -2531,7 +2533,7 @@ fn format_float(f: f64, precision: usize, scientific: bool) -> std::result::Resu
 /// Formats a value as a string (for %s conversion).
 /// This handles all types including lists, maps, timestamps, durations, etc.
 fn format_value_as_string(value: &Value) -> String {
-    use crate::objects::{Value::*, DynValue};
+    use crate::objects::DynValue;
 
     match value {
         Value::Null => "null".to_string(),
@@ -2561,10 +2563,10 @@ fn format_value_as_string(value: &Value) -> String {
         Value::Namespace(n) => n.as_str().to_string(),
         Value::Bytes(b) => {
             // Convert bytes to string using from_utf8_lossy
-            std::string::String::from_utf8_lossy(b.as_slice()).replace('\u{fffd}', "\u{fffd}")
+            std::string::String::from_utf8_lossy(b.as_slice()).into_owned()
         }
         Value::List(list) => {
-            let items: Vec<std::string::String> = list.iter().map(|v| format_value_as_string(v)).collect();
+            let items: Vec<std::string::String> = list.iter().map(format_value_as_string).collect();
             format!("[{}]", items.join(", "))
         }
         Value::Map(map) => {

@@ -309,7 +309,7 @@ impl CelType {
     pub fn substitute(&self, bindings: &std::collections::HashMap<Arc<str>, CelType>) -> CelType {
         match self {
             CelType::TypeParam(name) => {
-                bindings.get(name).cloned().unwrap_or_else(|| CelType::Dyn)
+                bindings.get(name).cloned().unwrap_or(CelType::Dyn)
             }
             CelType::List(elem) => CelType::List(Box::new(elem.substitute(bindings))),
             CelType::Map(key, val) => CelType::Map(

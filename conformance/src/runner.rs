@@ -1,4 +1,4 @@
-use cel::checker::{CelType, TypeChecker, TypeEnv};
+use cel::checker::TypeChecker;
 use cel::context::Context;
 use cel::objects::{Struct, Value as CelValue};
 use cel::Program;
@@ -11,7 +11,7 @@ use crate::proto::cel::expr::conformance::test::{
     simple_test::ResultMatcher, SimpleTest, SimpleTestFile,
 };
 use crate::textproto::parse_textproto_to_prost;
-use crate::type_env::{build_type_env_from_decls, cel_type_to_proto_type, proto_type_to_cel_type, types_equal};
+use crate::type_env::{build_type_env_from_decls, proto_type_to_cel_type, types_equal};
 use crate::value_converter::proto_value_to_cel_value;
 
 /// Get the integer value for an enum by its name.

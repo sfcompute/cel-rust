@@ -103,7 +103,7 @@ pub fn parse_proto_wire_format(bytes: &[u8]) -> Option<FieldMap> {
         // Add field to map (fields can appear multiple times)
         field_map
             .entry(field_number)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(field_value);
     }
 

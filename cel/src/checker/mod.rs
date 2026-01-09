@@ -92,6 +92,7 @@ pub struct TypeChecker<'a> {
     reference_map: HashMap<u64, Reference>,
     errors: Vec<TypeError>,
     /// Type parameter bindings during generic resolution.
+    #[allow(dead_code)]
     type_bindings: HashMap<Arc<str>, CelType>,
     /// Scoped variable types (for comprehensions).
     scoped_vars: Vec<HashMap<String, CelType>>,

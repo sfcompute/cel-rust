@@ -1,5 +1,5 @@
 use prost::Message;
-use prost_reflect::{DescriptorPool, DynamicMessage, ReflectMessage};
+use prost_reflect::{DescriptorPool, DynamicMessage};
 use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
@@ -90,98 +90,11 @@ fn build_descriptor_set(
 }
 
 /// Inject empty message extension fields into wire format.
-/// Protobuf spec omits empty optional messages from wire format, but we need to detect
-/// their presence for proto.hasExt(). This function adds them back.
-fn inject_empty_extensions(dynamic_msg: &DynamicMessage, buf: &mut Vec<u8>) {
-    use prost_reflect::Kind;
-
-    // Helper to encode a varint
-    fn encode_varint(mut value: u64) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        loop {
-            let mut byte = (value & 0x7F) as u8;
-            value >>= 7;
-            if value != 0 {
-                byte |= 0x80;
-            }
-            bytes.push(byte);
-            if value == 0 {
-                break;
-            }
-        }
-        bytes
-    }
-
-    // Helper to check if a field number exists in wire format
-    fn field_exists_in_wire_format(buf: &[u8], field_num: u32) -> bool {
-        let mut pos = 0;
-        while pos < buf.len() {
-            // Decode tag (field_number << 3 | wire_type)
-            let mut tag: u64 = 0;
-            let mut shift = 0;
-            loop {
-                if pos >= buf.len() {
-                    return false;
-                }
-                let byte = buf[pos];
-                pos += 1;
-                tag |= ((byte & 0x7F) as u64) << shift;
-                if (byte & 0x80) == 0 {
-                    break;
-                }
-                shift += 7;
-            }
-
-            let current_field_num = (tag >> 3) as u32;
-            let wire_type = (tag & 0x7) as u8;
-
-            if current_field_num == field_num {
-                return true;
-            }
-
-            // Skip field value based on wire type
-            match wire_type {
-                0 => {
-                    // Varint
-                    while pos < buf.len() && (buf[pos] & 0x80) != 0 {
-                        pos += 1;
-                    }
-                    pos += 1;
-                }
-                1 => {
-                    // Fixed64
-                    pos += 8;
-                }
-                2 => {
-                    // Length-delimited
-                    let mut length: u64 = 0;
-                    let mut shift = 0;
-                    while pos < buf.len() {
-                        let byte = buf[pos];
-                        pos += 1;
-                        length |= ((byte & 0x7F) as u64) << shift;
-                        if (byte & 0x80) == 0 {
-                            break;
-                        }
-                        shift += 7;
-                    }
-                    pos += length as usize;
-                }
-                5 => {
-                    // Fixed32
-                    pos += 4;
-                }
-                _ => return false,
-            }
-        }
-        false
-    }
-
-    // Note: This function turned out to inject at the wrong level (SimpleTestFile instead of TestAllTypes).
-    // The actual injection now happens in value_converter.rs::inject_empty_message_extensions()
-    // during Any-to-CEL conversion. Keeping this function skeleton for now in case we need it later.
-    let _ = dynamic_msg; // Suppress unused variable warning
-    let _ = buf;
+/// Note: This function turned out to inject at the wrong level (SimpleTestFile instead of TestAllTypes).
+/// The actual injection now happens in value_converter.rs::inject_empty_message_extensions()
+/// during Any-to-CEL conversion. Keeping this function skeleton for now in case we need it later.
+fn inject_empty_extensions(_dynamic_msg: &DynamicMessage, _buf: &mut Vec<u8>) {
+    // No-op: See note above
 }
 
 /// Parse textproto using prost-reflect (supports Any messages with type URLs)

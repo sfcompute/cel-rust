@@ -191,8 +191,8 @@ pub fn parse_bytes(s: &str) -> Result<Vec<u8>, ParseSequenceError> {
 /// valid quoted string.
 pub fn parse_string(s: &str) -> Result<String, ParseSequenceError> {
     // Check for raw triple-quoted strings first (r''' or r""" or R''' or R""")
-    if (s.starts_with("r'''") || s.starts_with("r\"\"\"") ||
-        s.starts_with("R'''") || s.starts_with("R\"\"\"")) {
+    if s.starts_with("r'''") || s.starts_with("r\"\"\"") ||
+        s.starts_with("R'''") || s.starts_with("R\"\"\"") {
         let quote = if s.contains("'''") { '\'' } else { '"' };
         return parse_raw_triple_quoted_string(s, quote);
     }

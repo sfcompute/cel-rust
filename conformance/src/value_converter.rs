@@ -611,67 +611,61 @@ fn parse_oneof_from_wire_format(wire_bytes: &[u8]) -> Result<Option<(String, Cel
 
     // Check for oneof field 400 (oneof_type - NestedTestAllTypes)
     if let Some(values) = field_map.get(&400) {
-        if let Some(first_value) = values.first() {
-            // Field 400 is a length-delimited message (NestedTestAllTypes)
-            if let cel::proto_compare::FieldValue::LengthDelimited(bytes) = first_value {
-                // Decode as NestedTestAllTypes
-                if let Ok(nested) = crate::proto::cel::expr::conformance::proto3::NestedTestAllTypes::decode(&bytes[..]) {
-                    // Convert NestedTestAllTypes to struct
-                    let mut nested_fields = HashMap::new();
+        // Field 400 is a length-delimited message (NestedTestAllTypes)
+        if let Some(cel::proto_compare::FieldValue::LengthDelimited(bytes)) = values.first() {
+            // Decode as NestedTestAllTypes
+            if let Ok(nested) = crate::proto::cel::expr::conformance::proto3::NestedTestAllTypes::decode(&bytes[..]) {
+                // Convert NestedTestAllTypes to struct
+                let mut nested_fields = HashMap::new();
 
-                    // Handle child field (recursive NestedTestAllTypes)
-                    if let Some(ref child) = nested.child {
-                        let mut child_fields = HashMap::new();
-                        if let Some(ref payload) = child.payload {
-                            let payload_struct = convert_test_all_types_proto3_to_struct(payload)?;
-                            child_fields.insert("payload".to_string(), payload_struct);
-                        }
-                        let child_struct = CelValue::Struct(cel::objects::Struct {
-                            type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
-                            fields: Arc::new(child_fields),
-                        });
-                        nested_fields.insert("child".to_string(), child_struct);
-                    }
-
-                    // Handle payload field (TestAllTypes)
-                    if let Some(ref payload) = nested.payload {
+                // Handle child field (recursive NestedTestAllTypes)
+                if let Some(ref child) = nested.child {
+                    let mut child_fields = HashMap::new();
+                    if let Some(ref payload) = child.payload {
                         let payload_struct = convert_test_all_types_proto3_to_struct(payload)?;
-                        nested_fields.insert("payload".to_string(), payload_struct);
+                        child_fields.insert("payload".to_string(), payload_struct);
                     }
-
-                    let nested_struct = CelValue::Struct(cel::objects::Struct {
+                    let child_struct = CelValue::Struct(cel::objects::Struct {
                         type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
-                        fields: Arc::new(nested_fields),
+                        fields: Arc::new(child_fields),
                     });
-                    return Ok(Some(("oneof_type".to_string(), nested_struct)));
+                    nested_fields.insert("child".to_string(), child_struct);
                 }
+
+                // Handle payload field (TestAllTypes)
+                if let Some(ref payload) = nested.payload {
+                    let payload_struct = convert_test_all_types_proto3_to_struct(payload)?;
+                    nested_fields.insert("payload".to_string(), payload_struct);
+                }
+
+                let nested_struct = CelValue::Struct(cel::objects::Struct {
+                    type_name: Arc::new("cel.expr.conformance.proto3.NestedTestAllTypes".to_string()),
+                    fields: Arc::new(nested_fields),
+                });
+                return Ok(Some(("oneof_type".to_string(), nested_struct)));
             }
         }
     }
 
     // Check for oneof field 401 (oneof_msg - NestedMessage)
     if let Some(values) = field_map.get(&401) {
-        if let Some(first_value) = values.first() {
-            if let cel::proto_compare::FieldValue::LengthDelimited(bytes) = first_value {
-                if let Ok(nested) = crate::proto::cel::expr::conformance::proto3::test_all_types::NestedMessage::decode(&bytes[..]) {
-                    let mut nested_fields = HashMap::new();
-                    nested_fields.insert("bb".to_string(), CelValue::Int(nested.bb as i64));
-                    let nested_struct = CelValue::Struct(cel::objects::Struct {
-                        type_name: Arc::new("cel.expr.conformance.proto3.NestedMessage".to_string()),
-                        fields: Arc::new(nested_fields),
-                    });
-                    return Ok(Some(("oneof_msg".to_string(), nested_struct)));
-                }
+        if let Some(cel::proto_compare::FieldValue::LengthDelimited(bytes)) = values.first() {
+            if let Ok(nested) = crate::proto::cel::expr::conformance::proto3::test_all_types::NestedMessage::decode(&bytes[..]) {
+                let mut nested_fields = HashMap::new();
+                nested_fields.insert("bb".to_string(), CelValue::Int(nested.bb as i64));
+                let nested_struct = CelValue::Struct(cel::objects::Struct {
+                    type_name: Arc::new("cel.expr.conformance.proto3.NestedMessage".to_string()),
+                    fields: Arc::new(nested_fields),
+                });
+                return Ok(Some(("oneof_msg".to_string(), nested_struct)));
             }
         }
     }
 
     // Check for oneof field 402 (oneof_bool - bool)
     if let Some(values) = field_map.get(&402) {
-        if let Some(first_value) = values.first() {
-            if let cel::proto_compare::FieldValue::Varint(v) = first_value {
-                return Ok(Some(("oneof_bool".to_string(), CelValue::Bool(*v != 0))));
-            }
+        if let Some(cel::proto_compare::FieldValue::Varint(v)) = values.first() {
+            return Ok(Some(("oneof_bool".to_string(), CelValue::Bool(*v != 0))));
         }
     }
 

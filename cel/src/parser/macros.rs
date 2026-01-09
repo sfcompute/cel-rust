@@ -404,9 +404,9 @@ fn bind_macro_expander(
         iter_range: list_expr,
         accu_var: result_var.clone(),
         // Dummy init value - will be overwritten in the first (and only) iteration
-        accu_init: helper.next_expr(Expr::Literal(Boolean(false).into())),
+        accu_init: helper.next_expr(Expr::Literal(Boolean(false))),
         // Always execute the loop body once
-        loop_cond: helper.next_expr(Expr::Literal(Boolean(true).into())),
+        loop_cond: helper.next_expr(Expr::Literal(Boolean(true))),
         // Evaluate body_expr with var_name in scope, store result in accumulator
         loop_step: body_expr,
         // Return the accumulator value

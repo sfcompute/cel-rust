@@ -755,7 +755,7 @@ fn register_map_functions(env: &mut TypeEnv) {
     );
 }
 
-fn register_math_functions(env: &mut TypeEnv) {
+fn register_math_functions(_env: &mut TypeEnv) {
     // These are typically extension functions but commonly used
 }
 

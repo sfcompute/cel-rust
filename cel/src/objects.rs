@@ -423,35 +423,6 @@ fn get_proto_field_default(type_name: &str, field_name: &str, legacy_enum: bool)
     None
 }
 
-/// Qualify a type name using the container context from the execution context.
-///
-/// Rules:
-/// 1. If type_name starts with '.', it's already absolute - return as-is (without the leading dot)
-/// 2. If type_name is fully qualified (contains '.'), return as-is
-/// 3. If context has a container and type_name is simple, prepend container
-/// 4. Otherwise, return type_name as-is
-fn qualify_type_name(type_name: &str, ctx: &crate::context::Context) -> String {
-    // Rule 1: Absolute type names start with '.'
-    if type_name.starts_with('.') {
-        return type_name[1..].to_string();
-    }
-
-    // Rule 2: Already qualified (contains '.')
-    if type_name.contains('.') {
-        return type_name.to_string();
-    }
-
-    // Rule 3: Qualify with container if available
-    if let Some(container) = ctx.get_container() {
-        if !container.is_empty() {
-            return format!("{}.{}", container, type_name);
-        }
-    }
-
-    // Rule 4: Return as-is
-    type_name.to_string()
-}
-
 fn get_wrapper_default(type_name: &str) -> Value {
     match type_name {
         "google.protobuf.BoolValue" => Value::Bool(false),
@@ -1134,39 +1105,6 @@ impl Value {
             want: expected.to_string(),
         }
     }
-
-    /// Unwrap a protobuf wrapper type (google.protobuf.*Value) to its inner value.
-    /// Returns the value unchanged if it's not a wrapper type.
-    fn unwrap_protobuf_wrapper(self) -> Value {
-        if let Value::Struct(ref s) = self {
-            if s.type_name.as_str().starts_with("google.protobuf.") &&
-               s.type_name.as_str().ends_with("Value") {
-                if let Some(value) = s.fields.get("value") {
-                    // For Int64Value and UInt64Value, check if the value exceeds JSON safe range
-                    match (s.type_name.as_str(), value) {
-                        ("google.protobuf.Int64Value", Value::Int(i)) => {
-                            // JSON safe integer range is -(2^53-1) to 2^53-1
-                            const MAX_SAFE_INT: i64 = 9007199254740991; // 2^53-1
-                            const MIN_SAFE_INT: i64 = -9007199254740991; // -(2^53-1)
-                            if *i > MAX_SAFE_INT || *i < MIN_SAFE_INT {
-                                return Value::String(Arc::new(i.to_string()));
-                            }
-                        }
-                        ("google.protobuf.UInt64Value", Value::UInt(u)) => {
-                            // JSON safe integer range for unsigned is 0 to 2^53-1
-                            const MAX_SAFE_UINT: u64 = 9007199254740991; // 2^53-1
-                            if *u > MAX_SAFE_UINT {
-                                return Value::String(Arc::new(u.to_string()));
-                            }
-                        }
-                        _ => {}
-                    }
-                    return value.clone();
-                }
-            }
-        }
-        self
-    }
 }
 
 impl From<&Value> for Value {
@@ -1756,7 +1694,7 @@ impl Value {
                                     match left.to_bool() {
                                         Ok(true) => {
                                             // Left is true, short-circuit
-                                            return Ok(left.into());
+                                            return Ok(left);
                                         }
                                         Ok(false) => {
                                             // Left is false, evaluate right
@@ -1769,13 +1707,13 @@ impl Value {
                                                     match right.to_bool() {
                                                         Ok(true) => {
                                                             // Right is true, return it (error is masked)
-                                                            return Ok(right.into());
+                                                            return Ok(right);
                                                         }
                                                         Ok(false) => {
                                                             // Right is false, propagate left error
                                                             return Err(left_error);
                                                         }
-                                                        Err(right_error) => {
+                                                        Err(_right_error) => {
                                                             // Both have type errors, propagate left error
                                                             return Err(left_error);
                                                         }
@@ -1796,7 +1734,7 @@ impl Value {
                                             match right.to_bool() {
                                                 Ok(true) => {
                                                     // Right is true, return it (error is masked)
-                                                    return Ok(right.into());
+                                                    return Ok(right);
                                                 }
                                                 _ => {
                                                     // Right doesn't determine result, propagate left error
@@ -1821,12 +1759,12 @@ impl Value {
                                     match left.to_bool() {
                                         Ok(false) => {
                                             // Left is false, short-circuit to false
-                                            return Ok(Value::Bool(false).into());
+                                            return Ok(Value::Bool(false));
                                         }
                                         Ok(true) => {
                                             // Left is true, evaluate right
                                             match Value::resolve(&call.args[1], ctx) {
-                                                Ok(right) => return Ok(Value::Bool(right.to_bool()?).into()),
+                                                Ok(right) => return Ok(Value::Bool(right.to_bool()?)),
                                                 Err(right_error) => return Err(right_error),
                                             }
                                         }
@@ -1837,13 +1775,13 @@ impl Value {
                                                     match right.to_bool() {
                                                         Ok(false) => {
                                                             // Right is false, return false (error is masked)
-                                                            return Ok(Value::Bool(false).into());
+                                                            return Ok(Value::Bool(false));
                                                         }
                                                         Ok(true) => {
                                                             // Right is true, propagate left error
                                                             return Err(left_error);
                                                         }
-                                                        Err(right_error) => {
+                                                        Err(_right_error) => {
                                                             // Both have type errors, propagate left error
                                                             return Err(left_error);
                                                         }
@@ -1864,7 +1802,7 @@ impl Value {
                                             match right.to_bool() {
                                                 Ok(false) => {
                                                     // Right is false, return false (error is masked)
-                                                    return Ok(Value::Bool(false).into());
+                                                    return Ok(Value::Bool(false));
                                                 }
                                                 _ => {
                                                     // Right doesn't determine result, propagate left error
@@ -2650,16 +2588,15 @@ impl Value {
                             // Well-known types that don't accept null values
                             // google.protobuf.Struct, ListValue, and map fields reject explicit null
                             // (but Timestamp and Duration can be null/unset)
-                            if value == Value::Null {
-                                if field_expr.field == "single_struct"
+                            if value == Value::Null
+                                && (field_expr.field == "single_struct"
                                     || field_expr.field == "list_value"
-                                    || field_expr.field.starts_with("map_") {
+                                    || field_expr.field.starts_with("map_")) {
                                     return Err(ExecutionError::function_error(
                                         "struct",
                                         "unsupported field type",
                                     ));
                                 }
-                            }
 
                             // Enum field validation: enums are stored as int32
                             // Check that values fit in int32 range
@@ -2695,7 +2632,7 @@ impl Value {
                                 const MAX_SAFE_INT: i64 = 9007199254740991; // 2^53-1
                                 const MIN_SAFE_INT: i64 = -9007199254740991; // -(2^53-1)
                                 match value {
-                                    Value::Int(i) if i > MAX_SAFE_INT || i < MIN_SAFE_INT => {
+                                    Value::Int(i) if !(MIN_SAFE_INT..=MAX_SAFE_INT).contains(&i) => {
                                         value = Value::String(Arc::new(i.to_string()));
                                     }
                                     Value::Int(i) => {
@@ -2868,7 +2805,7 @@ impl Value {
                 // Unwrap google.protobuf.Value - return the appropriate CEL value
                 if qualified_type_name == "google.protobuf.Value" {
                     // Check which field is set and return the appropriate value
-                    if let Some(_) = fields.get("null_value") {
+                    if fields.contains_key("null_value") {
                         return Ok(Value::Null);
                     }
                     if let Some(Value::Float(f)) = fields.get("number_value") {
