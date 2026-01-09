@@ -224,7 +224,7 @@ fn is_wrapper_short_name(name: &str) -> bool {
 
 /// Infer the default value for an unset proto field based on naming conventions and patterns.
 /// Returns None if no default can be inferred.
-fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
+fn get_proto_field_default(type_name: &str, field_name: &str, legacy_enum: bool) -> Option<Value> {
     // Only apply this logic to proto message types (not CEL structs)
     // Common patterns: TestAllTypes, NestedTestAllTypes, etc.
     // Apply more broadly - skip only if type_name is empty or clearly not a proto type
@@ -342,6 +342,10 @@ fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
     // Enum fields - both proto2 and proto3 enums default to 0 (the first enum value)
     // For conformance tests, all enum fields should have default value 0
     if field_name.ends_with("_enum") || field_name == "standalone_enum" {
+        // In legacy mode, enums are represented as plain integers
+        if legacy_enum {
+            return Some(Value::Int(0));
+        }
         // Construct the enum type name based on the struct type and field name
         let enum_type = if field_name == "standalone_enum" || field_name.contains("nested_enum") {
             // NestedEnum is a nested type within TestAllTypes
@@ -397,6 +401,18 @@ fn get_proto_field_default(type_name: &str, field_name: &str) -> Option<Value> {
         }
         if field_name.contains("bytes") {
             return Some(Value::Bytes(Arc::new(Vec::new())));
+        }
+
+        // Duration and Timestamp fields default to zero value
+        #[cfg(feature = "chrono")]
+        {
+            if field_name.contains("duration") {
+                return Some(Value::Duration(chrono::Duration::zero()));
+            }
+            if field_name.contains("timestamp") {
+                use chrono::{TimeZone, Utc};
+                return Some(Value::Timestamp(Utc.timestamp_opt(0, 0).unwrap().into()));
+            }
         }
 
         // Default for unknown scalar types
@@ -1904,7 +1920,7 @@ impl Value {
                                         None => {
                                             // Proto messages have default values for unset fields
                                             // Try to infer the appropriate default value
-                                            let default_value = get_proto_field_default(&s.type_name, property.as_str());
+                                            let default_value = get_proto_field_default(&s.type_name, property.as_str(), ctx.is_legacy_enum_mode());
                                             match default_value {
                                                 Some(val) => Ok(val),
                                                 None => Err(ExecutionError::NoSuchKey(property.clone())),
@@ -2037,7 +2053,7 @@ impl Value {
                                             _ => false,
                                         };
                                         if field_exists {
-                                            match inner.clone().member(&field) {
+                                            match inner.clone().member(&field, ctx.is_legacy_enum_mode()) {
                                                 Ok(val) => Ok(Value::Opaque(Arc::new(
                                                     OptionalValue::of(val),
                                                 ))),
@@ -2059,7 +2075,7 @@ impl Value {
                                 _ => false,
                             };
                             return if field_exists {
-                                match operand.member(&field) {
+                                match operand.member(&field, ctx.is_legacy_enum_mode()) {
                                     Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
                                     Err(_) => Ok(Value::Opaque(Arc::new(OptionalValue::none()))),
                                 }
@@ -2157,7 +2173,7 @@ impl Value {
                         // Found a qualified identifier match, apply remaining field accesses
                         let mut result = base_value;
                         for field in remaining_fields {
-                            result = result.member(&field)?;
+                            result = result.member(&field, ctx.is_legacy_enum_mode())?;
                         }
                         return Ok(result);
                     }
@@ -2203,7 +2219,7 @@ impl Value {
                                 // Field not explicitly set in struct - check if it's a known proto field
                                 // If get_proto_field_default returns Some, it's a valid field that's just unset
                                 // If it returns None, it's an undefined field and we should error
-                                if get_proto_field_default(&s.type_name, &select.field).is_some() {
+                                if get_proto_field_default(&s.type_name, &select.field, ctx.is_legacy_enum_mode()).is_some() {
                                     // Valid field, just not set
                                     Ok(Value::Bool(false))
                                 } else {
@@ -2215,7 +2231,7 @@ impl Value {
                         _ => Ok(Value::Bool(false)),
                     }
                 } else {
-                    left.member(&select.field)
+                    left.member(&select.field, ctx.is_legacy_enum_mode())
                 }
             }
             Expr::List(list_expr) => {
@@ -2960,7 +2976,7 @@ impl Value {
     //               Attribute("b")),
     //        FunctionCall([Ident("c")]))
 
-    fn member(self, name: &str) -> ResolveResult {
+    fn member(self, name: &str, legacy_enum: bool) -> ResolveResult {
         // Handle OptionalValue - unwrap it first, then access the member
         // If the OptionalValue contains None, return optional.none()
         if let Ok(opt_val) = <&OptionalValue>::try_from(&self) {
@@ -2968,7 +2984,7 @@ impl Value {
                 Some(inner) => {
                     // Check if inner value is a Map or Struct
                     let is_map_or_struct = matches!(inner, Value::Map(_) | Value::Struct(_));
-                    match inner.clone().member(name) {
+                    match inner.clone().member(name, legacy_enum) {
                         Ok(val) => Ok(Value::Opaque(Arc::new(OptionalValue::of(val)))),
                         // For Maps/Structs, missing keys become optional.none()
                         // For other types (null, int, etc.), field access errors are propagated
@@ -3003,12 +3019,18 @@ impl Value {
                     // Only apply JSON conversion for google.protobuf.Value fields (not Any fields)
                     // Fields like "single_value" use google.protobuf.Value type
                     // Fields like "single_any" use google.protobuf.Any type
-                    let unwrapped = value.clone().unwrap_protobuf_wrapper_for_field(name.as_str());
+                    let mut unwrapped = value.clone().unwrap_protobuf_wrapper_for_field(name.as_str());
+                    // In legacy enum mode, convert Enum values to Int
+                    if legacy_enum {
+                        if let Value::Enum(i, _) = unwrapped {
+                            unwrapped = Value::Int(i);
+                        }
+                    }
                     Some(unwrapped)
                 } else {
                     // Proto messages have default values for unset fields
                     // Try to infer the appropriate default value
-                    get_proto_field_default(&s.type_name, name.as_str())
+                    get_proto_field_default(&s.type_name, name.as_str(), legacy_enum)
                 }
             }
             Value::Namespace(ref path) => {

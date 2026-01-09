@@ -220,19 +220,8 @@ impl ConformanceRunner {
 
         // Run all tests in all sections
         for section in &test_file.section {
-            // Skip legacy sections (they test deprecated behavior where enums are ints)
-            if section.name.contains("legacy") {
-                for test in &section.test {
-                    results.merge(
-                        TestResult::Skipped {
-                            name: test.name.clone(),
-                            reason: "Legacy section (deprecated enum-as-int behavior)".to_string(),
-                        }
-                        .into(),
-                    );
-                }
-                continue;
-            }
+            // Detect legacy enum semantics based on section name
+            let is_legacy_section = section.name.starts_with("legacy_");
 
             for test in &section.test {
                 // Filter by category if specified
@@ -244,7 +233,7 @@ impl ConformanceRunner {
 
                 // Catch panics so we can continue running all tests
                 let test_result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_test(test)));
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_test(test, is_legacy_section)));
 
                 let result = match test_result {
                     Ok(r) => r,
@@ -260,7 +249,7 @@ impl ConformanceRunner {
         Ok(results)
     }
 
-    fn run_test(&self, test: &SimpleTest) -> TestResult {
+    fn run_test(&self, test: &SimpleTest, is_legacy: bool) -> TestResult {
         let test_name = &test.name;
 
         // Build type environment from test declarations
@@ -307,12 +296,13 @@ impl ConformanceRunner {
         }
 
         // Build context with bindings
-        let mut context = Context::default();
+        let mut context = Context::default()
+            .with_legacy_enum_semantics(is_legacy);
 
         // Always register fully qualified enum type maps for proto2 and proto3
         // This is needed for expressions like "cel.expr.conformance.proto2.TestAllTypes.NestedEnum.BAR"
         // even when no container is specified
-        register_fully_qualified_enum_maps(&mut context);
+        register_fully_qualified_enum_maps(&mut context, is_legacy);
 
         // Add container if specified
         if !test.container.is_empty() {
@@ -324,20 +314,31 @@ impl ConformanceRunner {
                 if type_name.contains("Enum") || type_name == "google.protobuf.NullValue" {
                     // Create factory function to generate enum constructors
                     let type_name_clone = type_name.clone();
+                    let is_legacy_mode = is_legacy;
                     let create_enum_constructor = move |_ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
                         match &value {
                             cel::objects::Value::String(name) => {
                                 // Convert enum name to integer value with type info
                                 let enum_value = get_enum_value_by_name(&type_name_clone, name.as_str())
                                     .ok_or_else(|| cel::ExecutionError::function_error("enum", "invalid"))?;
-                                Ok(cel::objects::Value::Enum(enum_value, Arc::new(type_name_clone.clone())))
+                                // In legacy mode, return Int; in strong mode, return Enum
+                                if is_legacy_mode {
+                                    Ok(cel::objects::Value::Int(enum_value))
+                                } else {
+                                    Ok(cel::objects::Value::Enum(enum_value, Arc::new(type_name_clone.clone())))
+                                }
                             }
                             cel::objects::Value::Int(i) => {
                                 // Validate int32 range for enum values
                                 if *i < i32::MIN as i64 || *i > i32::MAX as i64 {
                                     return Err(cel::ExecutionError::function_error("enum", "range"));
                                 }
-                                Ok(cel::objects::Value::Enum(*i, Arc::new(type_name_clone.clone())))
+                                // In legacy mode, return Int; in strong mode, return Enum
+                                if is_legacy_mode {
+                                    Ok(cel::objects::Value::Int(*i))
+                                } else {
+                                    Ok(cel::objects::Value::Enum(*i, Arc::new(type_name_clone.clone())))
+                                }
                             }
                             _ => {
                                 // For other values, return as-is
@@ -355,19 +356,28 @@ impl ConformanceRunner {
                     if type_name.contains("TestAllTypes.NestedEnum") {
                         // Also register with parent prefix
                         let type_name_clone2 = type_name.clone();
+                        let is_legacy_mode2 = is_legacy;
                         let create_enum_constructor2 = move |_ftx: &cel::FunctionContext, value: cel::objects::Value| -> Result<cel::objects::Value, cel::ExecutionError> {
                             match &value {
                                 cel::objects::Value::String(name) => {
                                     let enum_value = get_enum_value_by_name(&type_name_clone2, name.as_str())
                                         .ok_or_else(|| cel::ExecutionError::function_error("enum", "invalid"))?;
-                                    Ok(cel::objects::Value::Enum(enum_value, Arc::new(type_name_clone2.clone())))
+                                    if is_legacy_mode2 {
+                                        Ok(cel::objects::Value::Int(enum_value))
+                                    } else {
+                                        Ok(cel::objects::Value::Enum(enum_value, Arc::new(type_name_clone2.clone())))
+                                    }
                                 }
                                 cel::objects::Value::Int(i) => {
                                     // Validate int32 range for enum values
                                     if *i < i32::MIN as i64 || *i > i32::MAX as i64 {
                                         return Err(cel::ExecutionError::function_error("enum", "range"));
                                     }
-                                    Ok(cel::objects::Value::Enum(*i, Arc::new(type_name_clone2.clone())))
+                                    if is_legacy_mode2 {
+                                        Ok(cel::objects::Value::Int(*i))
+                                    } else {
+                                        Ok(cel::objects::Value::Enum(*i, Arc::new(type_name_clone2.clone())))
+                                    }
                                 }
                                 _ => Ok(value)
                             }
@@ -376,18 +386,25 @@ impl ConformanceRunner {
 
                         // Also register TestAllTypes as a map with NestedEnum field
                         let nested_enum_type_name = type_name.clone();
+                        let enum_val = |v: i64| -> cel::objects::Value {
+                            if is_legacy {
+                                cel::objects::Value::Int(v)
+                            } else {
+                                cel::objects::Value::Enum(v, Arc::new(nested_enum_type_name.clone()))
+                            }
+                        };
                         let mut nested_enum_map = std::collections::HashMap::new();
                         nested_enum_map.insert(
                             cel::objects::Key::String(Arc::new("FOO".to_string())),
-                            cel::objects::Value::Enum(0, Arc::new(nested_enum_type_name.clone())),
+                            enum_val(0),
                         );
                         nested_enum_map.insert(
                             cel::objects::Key::String(Arc::new("BAR".to_string())),
-                            cel::objects::Value::Enum(1, Arc::new(nested_enum_type_name.clone())),
+                            enum_val(1),
                         );
                         nested_enum_map.insert(
                             cel::objects::Key::String(Arc::new("BAZ".to_string())),
-                            cel::objects::Value::Enum(2, Arc::new(nested_enum_type_name.clone())),
+                            enum_val(2),
                         );
 
                         let mut test_all_types_fields = std::collections::HashMap::new();
@@ -413,18 +430,25 @@ impl ConformanceRunner {
                     // For GlobalEnum - register as a map with enum values
                     if type_name.contains("GlobalEnum") && !type_name.contains("TestAllTypes") {
                         let global_enum_type_name = type_name.clone();
+                        let enum_val = |v: i64| -> cel::objects::Value {
+                            if is_legacy {
+                                cel::objects::Value::Int(v)
+                            } else {
+                                cel::objects::Value::Enum(v, Arc::new(global_enum_type_name.clone()))
+                            }
+                        };
                         let mut global_enum_map = std::collections::HashMap::new();
                         global_enum_map.insert(
                             cel::objects::Key::String(Arc::new("GOO".to_string())),
-                            cel::objects::Value::Enum(0, Arc::new(global_enum_type_name.clone())),
+                            enum_val(0),
                         );
                         global_enum_map.insert(
                             cel::objects::Key::String(Arc::new("GAR".to_string())),
-                            cel::objects::Value::Enum(1, Arc::new(global_enum_type_name.clone())),
+                            enum_val(1),
                         );
                         global_enum_map.insert(
                             cel::objects::Key::String(Arc::new("GAZ".to_string())),
-                            cel::objects::Value::Enum(2, Arc::new(global_enum_type_name.clone())),
+                            enum_val(2),
                         );
 
                         context.add_variable("GlobalEnum", cel::objects::Value::Map(cel::objects::Map {
@@ -1225,21 +1249,30 @@ fn test_name_matches_category(test_name: &str, category: &str) -> bool {
 /// Register fully qualified enum type maps for proto2 and proto3
 /// This enables expressions like "cel.expr.conformance.proto2.TestAllTypes.NestedEnum.BAR"
 /// to resolve even without a container specified
-fn register_fully_qualified_enum_maps(context: &mut cel::Context) {
+fn register_fully_qualified_enum_maps(context: &mut cel::Context, is_legacy: bool) {
+    // Helper to create enum value based on mode
+    let enum_val = |value: i64, type_name: &str| -> cel::objects::Value {
+        if is_legacy {
+            cel::objects::Value::Int(value)
+        } else {
+            cel::objects::Value::Enum(value, Arc::new(type_name.to_string()))
+        }
+    };
+
     // Proto2 TestAllTypes.NestedEnum
     let proto2_nested_enum = "cel.expr.conformance.proto2.TestAllTypes.NestedEnum";
     let mut nested_enum_map = std::collections::HashMap::new();
     nested_enum_map.insert(
         cel::objects::Key::String(Arc::new("FOO".to_string())),
-        cel::objects::Value::Enum(0, Arc::new(proto2_nested_enum.to_string())),
+        enum_val(0, proto2_nested_enum),
     );
     nested_enum_map.insert(
         cel::objects::Key::String(Arc::new("BAR".to_string())),
-        cel::objects::Value::Enum(1, Arc::new(proto2_nested_enum.to_string())),
+        enum_val(1, proto2_nested_enum),
     );
     nested_enum_map.insert(
         cel::objects::Key::String(Arc::new("BAZ".to_string())),
-        cel::objects::Value::Enum(2, Arc::new(proto2_nested_enum.to_string())),
+        enum_val(2, proto2_nested_enum),
     );
 
     let mut test_all_types_fields = std::collections::HashMap::new();
@@ -1265,15 +1298,15 @@ fn register_fully_qualified_enum_maps(context: &mut cel::Context) {
     let mut global_enum_map = std::collections::HashMap::new();
     global_enum_map.insert(
         cel::objects::Key::String(Arc::new("GOO".to_string())),
-        cel::objects::Value::Enum(0, Arc::new(proto2_global_enum.to_string())),
+        enum_val(0, proto2_global_enum),
     );
     global_enum_map.insert(
         cel::objects::Key::String(Arc::new("GAR".to_string())),
-        cel::objects::Value::Enum(1, Arc::new(proto2_global_enum.to_string())),
+        enum_val(1, proto2_global_enum),
     );
     global_enum_map.insert(
         cel::objects::Key::String(Arc::new("GAZ".to_string())),
-        cel::objects::Value::Enum(2, Arc::new(proto2_global_enum.to_string())),
+        enum_val(2, proto2_global_enum),
     );
     context.add_variable("cel.expr.conformance.proto2.GlobalEnum", cel::objects::Value::Map(cel::objects::Map {
         map: Arc::new(global_enum_map),
@@ -1284,15 +1317,15 @@ fn register_fully_qualified_enum_maps(context: &mut cel::Context) {
     let mut nested_enum_map3 = std::collections::HashMap::new();
     nested_enum_map3.insert(
         cel::objects::Key::String(Arc::new("FOO".to_string())),
-        cel::objects::Value::Enum(0, Arc::new(proto3_nested_enum.to_string())),
+        enum_val(0, proto3_nested_enum),
     );
     nested_enum_map3.insert(
         cel::objects::Key::String(Arc::new("BAR".to_string())),
-        cel::objects::Value::Enum(1, Arc::new(proto3_nested_enum.to_string())),
+        enum_val(1, proto3_nested_enum),
     );
     nested_enum_map3.insert(
         cel::objects::Key::String(Arc::new("BAZ".to_string())),
-        cel::objects::Value::Enum(2, Arc::new(proto3_nested_enum.to_string())),
+        enum_val(2, proto3_nested_enum),
     );
 
     let mut test_all_types_fields3 = std::collections::HashMap::new();
@@ -1316,15 +1349,15 @@ fn register_fully_qualified_enum_maps(context: &mut cel::Context) {
     let mut global_enum_map3 = std::collections::HashMap::new();
     global_enum_map3.insert(
         cel::objects::Key::String(Arc::new("GOO".to_string())),
-        cel::objects::Value::Enum(0, Arc::new(proto3_global_enum.to_string())),
+        enum_val(0, proto3_global_enum),
     );
     global_enum_map3.insert(
         cel::objects::Key::String(Arc::new("GAR".to_string())),
-        cel::objects::Value::Enum(1, Arc::new(proto3_global_enum.to_string())),
+        enum_val(1, proto3_global_enum),
     );
     global_enum_map3.insert(
         cel::objects::Key::String(Arc::new("GAZ".to_string())),
-        cel::objects::Value::Enum(2, Arc::new(proto3_global_enum.to_string())),
+        enum_val(2, proto3_global_enum),
     );
     context.add_variable("cel.expr.conformance.proto3.GlobalEnum", cel::objects::Value::Map(cel::objects::Map {
         map: Arc::new(global_enum_map3),

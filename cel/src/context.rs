@@ -36,6 +36,7 @@ pub enum Context<'a> {
         variables: BTreeMap<String, Value>,
         resolver: Option<&'a dyn VariableResolver>,
         container: Option<String>,
+        legacy_enum_semantics: bool,
     },
     Child {
         parent: &'a Context<'a>,
@@ -102,6 +103,28 @@ impl<'a> Context<'a> {
             }
         }
         self
+    }
+
+    /// Enable legacy enum semantics where enums are represented as plain integers.
+    /// This is needed for compatibility with older CEL implementations.
+    pub fn with_legacy_enum_semantics(mut self, legacy: bool) -> Self {
+        match &mut self {
+            Context::Root { legacy_enum_semantics, .. } => {
+                *legacy_enum_semantics = legacy;
+            }
+            Context::Child { .. } => {
+                // Child contexts inherit from parent, cannot set directly
+            }
+        }
+        self
+    }
+
+    /// Check if legacy enum semantics are enabled.
+    pub fn is_legacy_enum_mode(&self) -> bool {
+        match self {
+            Context::Root { legacy_enum_semantics, .. } => *legacy_enum_semantics,
+            Context::Child { parent, .. } => parent.is_legacy_enum_mode(),
+        }
     }
 
     /// Get the container prefix for type name qualification
@@ -235,6 +258,7 @@ impl<'a> Context<'a> {
             functions: Default::default(),
             resolver: None,
             container: None,
+            legacy_enum_semantics: false,
         }
     }
 }
@@ -246,6 +270,7 @@ impl Default for Context<'_> {
             functions: Default::default(),
             resolver: None,
             container: None,
+            legacy_enum_semantics: false,
         };
 
         ctx.add_function("contains", functions::contains);
