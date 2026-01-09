@@ -1,6 +1,7 @@
 pub mod proto;
 pub mod runner;
 pub mod textproto;
+pub mod type_env;
 pub mod value_converter;
 
 pub use runner::{ConformanceRunner, TestResults};

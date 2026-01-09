@@ -1,3 +1,4 @@
+use cel::checker::{CelType, TypeChecker, TypeEnv};
 use cel::context::Context;
 use cel::objects::{Struct, Value as CelValue};
 use cel::Program;
@@ -10,6 +11,7 @@ use crate::proto::cel::expr::conformance::test::{
     simple_test::ResultMatcher, SimpleTest, SimpleTestFile,
 };
 use crate::textproto::parse_textproto_to_prost;
+use crate::type_env::{build_type_env_from_decls, cel_type_to_proto_type, proto_type_to_cel_type, types_equal};
 use crate::value_converter::proto_value_to_cel_value;
 
 /// Get the integer value for an enum by its name.
@@ -261,13 +263,12 @@ impl ConformanceRunner {
     fn run_test(&self, test: &SimpleTest) -> TestResult {
         let test_name = &test.name;
 
-        // Skip tests that are check-only or have features we don't support yet
-        if test.check_only {
-            return TestResult::Skipped {
-                name: test_name.clone(),
-                reason: "check_only not yet implemented".to_string(),
-            };
-        }
+        // Build type environment from test declarations
+        let type_env = build_type_env_from_decls(&test.type_env, &if test.container.is_empty() {
+            None
+        } else {
+            Some(test.container.clone())
+        });
 
         // Parse the expression - catch panics here too
         let program = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -287,6 +288,23 @@ impl ConformanceRunner {
                 };
             }
         };
+
+        // Type check the expression
+        let check_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut checker = TypeChecker::new(&type_env);
+            checker.check_expr(program.expression())
+        }));
+
+        let checked_expr = match check_result {
+            Ok(Ok(expr)) => Some(expr),
+            Ok(Err(_)) => None, // Type checking failed, but we'll continue to evaluation
+            Err(_) => None, // Panic during type checking
+        };
+
+        // For check_only tests, only verify the type (don't evaluate)
+        if test.check_only {
+            return self.run_check_only_test(test_name, test, checked_expr.as_ref());
+        }
 
         // Build context with bindings
         let mut context = Context::default();
@@ -531,10 +549,9 @@ impl ConformanceRunner {
                 name: test_name.clone(),
                 reason: "Any unknowns matching not yet implemented".to_string(),
             },
-            Some(ResultMatcher::TypedResult(_)) => TestResult::Skipped {
-                name: test_name.clone(),
-                reason: "Typed result matching not yet implemented".to_string(),
-            },
+            Some(ResultMatcher::TypedResult(typed_result)) => {
+                self.run_typed_result_test(test_name, result, typed_result, checked_expr.as_ref())
+            }
             None => {
                 // Default to expecting true
                 match result {
@@ -550,6 +567,160 @@ impl ConformanceRunner {
                         error: format!("Execution error: {:?}", e),
                     },
                 }
+            }
+        }
+    }
+
+    /// Handle check_only tests - verify type checking only, no evaluation
+    fn run_check_only_test(
+        &self,
+        test_name: &str,
+        test: &SimpleTest,
+        checked_expr: Option<&cel::checker::CheckedExpr>,
+    ) -> TestResult {
+        // For check_only tests with typed_result, verify the deduced type
+        if let Some(ResultMatcher::TypedResult(typed_result)) = &test.result_matcher {
+            if let Some(expected_type) = &typed_result.deduced_type {
+                match checked_expr {
+                    Some(expr) => {
+                        // Get the root expression type (ID 0 or the max ID)
+                        let root_type = expr.get_root_type();
+
+                        match root_type {
+                            Some(actual_type) => {
+                                if types_equal(expected_type, actual_type) {
+                                    TestResult::Passed {
+                                        name: test_name.to_string(),
+                                    }
+                                } else {
+                                    let expected_cel_type = proto_type_to_cel_type(expected_type);
+                                    TestResult::Failed {
+                                        name: test_name.to_string(),
+                                        error: format!(
+                                            "Type mismatch: expected {:?}, got {:?}",
+                                            expected_cel_type, actual_type
+                                        ),
+                                    }
+                                }
+                            }
+                            None => TestResult::Failed {
+                                name: test_name.to_string(),
+                                error: "Type checking succeeded but no root type found".to_string(),
+                            },
+                        }
+                    }
+                    None => TestResult::Failed {
+                        name: test_name.to_string(),
+                        error: "Type checking failed".to_string(),
+                    },
+                }
+            } else {
+                // No expected type specified, just verify parsing and type checking succeeded
+                if checked_expr.is_some() {
+                    TestResult::Passed {
+                        name: test_name.to_string(),
+                    }
+                } else {
+                    TestResult::Failed {
+                        name: test_name.to_string(),
+                        error: "Type checking failed".to_string(),
+                    }
+                }
+            }
+        } else {
+            // check_only without typed_result - just verify parsing and type checking work
+            if checked_expr.is_some() {
+                TestResult::Passed {
+                    name: test_name.to_string(),
+                }
+            } else {
+                TestResult::Failed {
+                    name: test_name.to_string(),
+                    error: "Type checking failed".to_string(),
+                }
+            }
+        }
+    }
+
+    /// Handle TypedResult tests - verify both the value and deduced type
+    fn run_typed_result_test(
+        &self,
+        test_name: &str,
+        result: Result<CelValue, cel::ExecutionError>,
+        typed_result: &crate::proto::cel::expr::conformance::test::TypedResult,
+        checked_expr: Option<&cel::checker::CheckedExpr>,
+    ) -> TestResult {
+        // First, verify the deduced type if specified
+        if let Some(expected_type) = &typed_result.deduced_type {
+            match checked_expr {
+                Some(expr) => {
+                    let root_type = expr.get_root_type();
+                    match root_type {
+                        Some(actual_type) => {
+                            if !types_equal(expected_type, actual_type) {
+                                let expected_cel_type = proto_type_to_cel_type(expected_type);
+                                return TestResult::Failed {
+                                    name: test_name.to_string(),
+                                    error: format!(
+                                        "Type mismatch: expected {:?}, got {:?}",
+                                        expected_cel_type, actual_type
+                                    ),
+                                };
+                            }
+                        }
+                        None => {
+                            return TestResult::Failed {
+                                name: test_name.to_string(),
+                                error: "Type checking succeeded but no root type found".to_string(),
+                            };
+                        }
+                    }
+                }
+                None => {
+                    return TestResult::Failed {
+                        name: test_name.to_string(),
+                        error: "Type checking failed".to_string(),
+                    };
+                }
+            }
+        }
+
+        // Then, verify the result value if specified
+        if let Some(expected_value) = &typed_result.result {
+            match proto_value_to_cel_value(expected_value) {
+                Ok(expected_cel_value) => match result {
+                    Ok(actual_value) => {
+                        let actual_unwrapped = unwrap_wrapper_if_needed(actual_value.clone());
+                        let expected_unwrapped = unwrap_wrapper_if_needed(expected_cel_value.clone());
+
+                        if values_equal(&actual_unwrapped, &expected_unwrapped) {
+                            TestResult::Passed {
+                                name: test_name.to_string(),
+                            }
+                        } else {
+                            TestResult::Failed {
+                                name: test_name.to_string(),
+                                error: format!(
+                                    "Value mismatch: expected {:?}, got {:?}",
+                                    expected_unwrapped, actual_unwrapped
+                                ),
+                            }
+                        }
+                    }
+                    Err(e) => TestResult::Failed {
+                        name: test_name.to_string(),
+                        error: format!("Execution error: {:?}", e),
+                    },
+                },
+                Err(e) => TestResult::Failed {
+                    name: test_name.to_string(),
+                    error: format!("Failed to convert expected value: {}", e),
+                },
+            }
+        } else {
+            // No expected value specified, just type checking passed
+            TestResult::Passed {
+                name: test_name.to_string(),
             }
         }
     }

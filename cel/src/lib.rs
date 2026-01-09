@@ -17,6 +17,7 @@ pub use functions::FunctionContext;
 pub use objects::{ResolveResult, Value};
 use parser::{Expression, ExpressionReferences, Parser};
 pub use parser::{ParseError, ParseErrors};
+pub mod checker;
 pub mod functions;
 mod magic;
 pub mod objects;
